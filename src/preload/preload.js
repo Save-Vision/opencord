@@ -2,7 +2,8 @@
 // The only bridge between the sandboxed UI and the main process.
 const { contextBridge, ipcRenderer, webUtils } = require('electron')
 
-const EVENTS = new Set(['ops', 'peer-join', 'peer-leave', 'peer-update', 'eph', 'blob-progress', 'focus-change', 'hotkey', 'update', 'membership', 'friends'])
+const EVENTS = new Set(['ops', 'peer-join', 'peer-leave', 'peer-update', 'eph', 'blob-progress', 'focus-change', 'hotkey', 'update', 'membership', 'friends',
+  'group-added', 'group-removed', 'joins', 'notice', 'open-link'])
 const invoke = (ch, ...args) => ipcRenderer.invoke(ch, ...args)
 
 contextBridge.exposeInMainWorld('od', {
@@ -13,7 +14,9 @@ contextBridge.exposeInMainWorld('od', {
   createGroup: (name) => invoke('group:create', name),
   joinGroup: (invite) => invoke('group:join', invite),
   leaveGroup: (id) => invoke('group:leave', id),
-  getInvite: (id) => invoke('group:invite', id),
+  createInvite: (gid, ttl) => invoke('invite:create', gid, ttl),
+  revokeInvite: (gid, id) => invoke('invite:revoke', gid, id),
+  cancelJoin: (id) => invoke('join:cancel', id),
 
   kick: (gid, key) => invoke('member:kick', gid, key),
   setRole: (gid, key, role) => invoke('member:role', gid, key, role),
@@ -23,12 +26,15 @@ contextBridge.exposeInMainWorld('od', {
   acceptFriend: (key) => invoke('friend:accept', key),
   declineFriend: (key) => invoke('friend:decline', key),
   removeFriend: (key) => invoke('friend:remove', key),
+  createFriendLink: (ttl) => invoke('friend:link', ttl),
+  revokeFriendLink: (id) => invoke('friend:link-revoke', id),
 
   storageInfo: () => invoke('storage:info'),
   pickStorage: () => invoke('storage:pick'),
   checkStorage: (picked) => invoke('storage:check', picked),
   moveStorage: (dir, existing) => invoke('storage:move', dir, existing),
   openStorage: () => invoke('storage:open'),
+  cleanStorage: (days) => invoke('storage:clean', days),
 
   linkPreview: (url) => invoke('link:preview', url),
 

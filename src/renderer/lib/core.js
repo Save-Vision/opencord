@@ -157,12 +157,17 @@ export function handleNewOps (gid, ops) {
     if (op.k !== 'msg' || op.a === model.me.key) continue
     if (Date.now() - op.t > 2 * 60 * 1000) continue // history arriving via sync — don't spam
     const ch = g.channels.get(op.d.ch)
-    const viewing = model.ui.focused && model.ui.gid === gid && !model.ui.stage && model.currentChannel(g)?.id === op.d.ch
+    const th = typeof op.d.th === 'string' && !op.d.also ? op.d.th : null
+    // Thread replies only notify people in the thread (or mentioned), like Slack
+    if (th && !model.follows(g, th) && !model.mentionsMe(op.d.text)) continue
+    const here = model.ui.focused && model.ui.gid === gid && !model.ui.stage && !model.ui.planner
+    const viewing = th ? here && model.ui.thread?.id === th : here && model.currentChannel(g)?.id === op.d.ch
     if (viewing) continue
     api.attention()
     if (!model.settings.notifications) continue
     try {
-      const n = new Notification(g.dm ? model.memberName(g, op.a) : `${model.memberName(g, op.a)} · #${ch?.name || 'channel'}`, {
+      const where = g.dm ? model.memberName(g, op.a) : `${model.memberName(g, op.a)} · #${ch?.name || 'channel'}`
+      const n = new Notification(th ? where + ' · thread' : where, {
         body: (op.d.text || '').slice(0, 180) || (op.d.att?.length ? '📎 sent a file' : ''),
         icon: model.memberAvatar(g, op.a) || undefined,
         silent: false
@@ -172,6 +177,7 @@ export function handleNewOps (gid, ops) {
         model.ui.stage = null
         model.selectGroup(gid)
         model.selectChannel(gid, op.d.ch)
+        if (th) model.openThread(gid, th)
       }
     } catch {}
   }

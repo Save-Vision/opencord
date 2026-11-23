@@ -19,7 +19,7 @@ const INLINE = new RegExp([
   /~~(?<strike>[\s\S]+?)~~/.source,
   /\|\|(?<spoiler>[\s\S]+?)\|\|/.source,
   /<(?<angle>https?:\/\/[^\s<>]+)>/.source,
-  /(?<url>https?:\/\/[^\s<>]+[^\s<>.,:;"')\]!?])/.source,
+  /(?<url>(?:https?|opendiscord):\/\/[^\s<>]+[^\s<>.,:;"')\]!?])/.source,
   /(?<mention>@[\p{L}\p{N}_.-]+)/.source
 ].join('|'), 'gu')
 

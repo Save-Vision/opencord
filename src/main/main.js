@@ -66,10 +66,37 @@ let updater = null
 let quitting = false
 let pendingScreen = null
 
+// opendiscord:// links (one-time invites and friend links). Clicking one starts the app, or
+// hands the link to the running one (second-instance on Windows/Linux, open-url on macOS).
+const LINK_RE = /^opendiscord:\/\/(join|friend)\//i
+let uiReady = false
+let pendingLink = (process.argv.find(a => LINK_RE.test(a))) || null
+function openLink (url) {
+  if (!url || !LINK_RE.test(url)) return
+  if (uiReady && win && !win.isDestroyed()) send('open-link', url)
+  else pendingLink = url
+  if (win) showWindow()
+}
+app.on('open-url', (e, url) => { e.preventDefault(); openLink(url) })
+
+// Only an installed copy registers itself for opendiscord://; test, dev and --profile runs
+// leave the system alone. (The installer registers it too, see "protocols" in package.json.)
+function registerLinkHandler () {
+  if (!app.isPackaged || process.env.OD_DATA_DIR || profile) return
+  try {
+    const exe = process.env.PORTABLE_EXECUTABLE_FILE
+    if (exe) app.setAsDefaultProtocolClient('opendiscord', exe)
+    else if (!app.isDefaultProtocolClient('opendiscord')) app.setAsDefaultProtocolClient('opendiscord')
+  } catch {}
+}
+
 if (!app.requestSingleInstanceLock()) {
   app.quit()
 } else {
-  app.on('second-instance', showWindow)
+  app.on('second-instance', (_e, argv) => {
+    showWindow()
+    openLink((argv || []).find(a => LINK_RE.test(a)))
+  })
   app.whenReady().then(boot).catch((err) => {
     dialog.showErrorBox('OpenDiscord failed to start', String(err && err.stack || err))
     app.exit(1)
@@ -103,8 +130,22 @@ async function boot () {
   wireNetwork()
   createWindow()
   createTray()
+  registerLinkHandler()
   updater.start()
   await net.start()
+  startMaintenance()
+}
+
+// Hourly: turn superseded ops into stubs, fold logs into compressed segments, and drop
+// friends' old files if the user asked for that (Settings → Storage).
+function startMaintenance () {
+  const run = () => {
+    try { store.sweep() } catch (err) { console.warn('[store] sweep', err.message) }
+    const days = Number(store.settings.cleanFriendsFilesDays) || 0
+    store.cleanBlobs({ days, friends: days > 0 }).catch(() => {})
+  }
+  setTimeout(run, 30 * 1000).unref?.()
+  setInterval(run, 60 * 60 * 1000).unref?.()
 }
 
 // The data folder can live anywhere (Settings → Storage). A scheduled move runs here, before
@@ -302,6 +343,16 @@ function sendMembership (gid) {
   if (g) send('membership', gid, store.membershipInfo(g))
 }
 
+const sendJoins = () => send('joins', store.joinsInfo())
+const notice = (text, kind = 'info') => send('notice', { text, kind })
+
+const JOIN_FAILED = {
+  used: 'was already used by someone else',
+  expired: 'has expired',
+  revoked: 'was cancelled',
+  denied: "isn't valid"
+}
+
 function appendAndBroadcast (gid, kind, data, make = () => store.append(gid, kind, data)) {
   const op = make()
   net.broadcastOps(gid, [op])
@@ -311,16 +362,23 @@ function appendAndBroadcast (gid, kind, data, make = () => store.append(gid, kin
 function registerIpc () {
   const handle = (ch, fn) => ipcMain.handle(ch, (_e, ...args) => fn(...args))
 
-  handle('init', () => ({
-    me: store.publicIdentity(),
-    settings: store.settings,
-    platform: process.platform,
-    version: app.getVersion(),
-    profile,
-    groups: [...store.groups.values()].map(groupPayload),
-    peers: net.onlinePeers(),
-    friends: store.friendsInfo()
-  }))
+  handle('init', () => {
+    uiReady = true
+    const link = pendingLink
+    pendingLink = null
+    return {
+      me: store.publicIdentity(),
+      settings: store.settings,
+      platform: process.platform,
+      version: app.getVersion(),
+      profile,
+      groups: [...store.groups.values()].map(groupPayload),
+      peers: net.onlinePeers(),
+      friends: store.friendsInfo(),
+      joins: store.joinsInfo(),
+      link
+    }
+  })
 
   handle('friends:info', () => store.friendsInfo())
   handle('friend:add', (code, name) => {
@@ -330,6 +388,12 @@ function registerIpc () {
   })
   handle('friend:accept', (key) => connectFriend(store.acceptFriend(key), key))
   handle('friend:decline', (key) => { store.declineFriend(key); sendFriends(); return true })
+  handle('friend:link', (ttl) => {
+    const link = store.createFriendLink(Number(ttl) || 0)
+    sendFriends()
+    return link
+  })
+  handle('friend:link-revoke', (id) => { store.revokeFriendLink(String(id)); sendFriends(); return true })
   handle('friend:remove', (key) => {
     net.cancelFriendRequest(key)
     const g = store.removeFriend(key)
@@ -354,10 +418,35 @@ function registerIpc () {
     return groupPayload(g)
   })
   handle('group:join', (invite) => {
+    // A one-time link: wait for a member to let us in (network 'joined' / 'join-failed')
+    if (c.parseLink(invite)) {
+      const r = store.startJoin(invite)
+      if (r.group) return { ...groupPayload(r.group), existed: true }
+      net.startJoin(r.join)
+      sendJoins()
+      return { pending: true, join: { id: r.join.id, gid: r.join.gid, name: r.join.name } }
+    }
     const { group, existed, rekeyed } = store.joinGroup(invite)
     if (!existed || rekeyed) net.joinGroup(group)
     if (rekeyed) sendMembership(group.id)
     return { ...groupPayload(group), existed, rekeyed }
+  })
+  handle('join:cancel', (id) => {
+    net.cancelJoin(id)
+    store.dropJoin(id)
+    sendJoins()
+    return true
+  })
+  handle('invite:create', (gid, ttl) => {
+    const { op, link } = store.createInvite(gid, Number(ttl) || 0)
+    net.broadcastOps(gid, [op])
+    net.refreshInvites()
+    return { op, link }
+  })
+  handle('invite:revoke', (gid, id) => {
+    const op = appendAndBroadcast(gid, 'invite.revoke', { id: String(id) })
+    net.refreshInvites()
+    return op
   })
   // Moderation. Kicking rotates the group key (see store.kick). The op goes out first, so the
   // kicked person's app learns why it lost access; then the network re-checks everyone and
@@ -380,11 +469,12 @@ function registerIpc () {
     if (g) net.leaveGroup(g)
     return true
   })
-  handle('group:invite', (id) => store.inviteFor(id))
 
   handle('op:append', (gid, kind, data) => {
-    if (MEMBERSHIP_KINDS.has(kind)) throw new Error('Use the moderation actions for ' + kind)
-    return appendAndBroadcast(gid, kind, data)
+    if (MEMBERSHIP_KINDS.has(kind) || /^invite\.(create|used)$/.test(kind)) throw new Error('Use the dedicated action for ' + kind)
+    const op = appendAndBroadcast(gid, kind, data)
+    if (kind === 'group.settings') net.refreshInvites()
+    return op
   })
   ipcMain.on('eph', (_e, gid, to, data) => net.sendEphemeral(gid, to, data))
 
@@ -452,8 +542,15 @@ function registerIpc () {
     dir: store.dir,
     defaultDir: app.getPath('userData'),
     locked: !!process.env.OD_DATA_DIR,
-    size: await datadir.dirSize(store.dir)
+    size: await datadir.dirSize(store.dir),
+    messages: store.messageUsage(),
+    files: await store.blobUsage()
   }))
+  handle('storage:clean', async (days) => {
+    const d = Math.max(0, Number(days) || 0)
+    store.sweep()
+    return store.cleanBlobs({ days: d, friends: true })
+  })
   handle('storage:pick', async () => {
     const r = await dialog.showOpenDialog(win, { title: 'Choose where OpenDiscord keeps your data', properties: ['openDirectory', 'createDirectory'] })
     return r.canceled || !r.filePaths[0] ? null : r.filePaths[0]
@@ -489,6 +586,29 @@ function wireNetwork () {
   net.on('friend-request', (key) => {
     sendFriends()
     if (win && !win.isFocused()) win.flashFrame(true)
+  })
+  // Someone opened our one-time friend link: we're friends now
+  net.on('friend-linked', (key, g) => {
+    send('group-added', groupPayload(g))
+    sendFriends()
+    if (win && !win.isFocused()) win.flashFrame(true)
+  })
+  // The friend link we opened was used or expired: undo the pending private chat
+  net.on('friend-rejected', (key, reason) => {
+    const name = store.friends.outgoing[key]?.name || 'your friend'
+    const g = store.removeFriend(key)
+    if (g) { net.leaveGroup(g); send('group-removed', g.id) }
+    sendFriends()
+    notice(`The friend link from ${name} ${reason === 'used' ? 'was already used' : reason === 'expired' ? 'has expired' : 'is no longer valid'}. Ask them for a new one.`, 'error')
+  })
+  net.on('joined', (_id, { group, rekeyed }) => {
+    if (rekeyed) sendMembership(group.id)
+    send('group-added', groupPayload(group), { joined: true })
+    sendJoins()
+  })
+  net.on('join-failed', (_id, reason, j) => {
+    sendJoins()
+    notice(`The invite to ${j?.name || 'the group'} ${JOIN_FAILED[reason] || 'did not work'}. Ask for a new link.`, 'error')
   })
   net.on('warning', (err) => console.warn('[net]', err && err.message))
   net.on('ops', (g, ops) => {

@@ -134,18 +134,101 @@ function makeFriendCode (publicKeyHex, name) {
 function parseFriendCode (code) {
   code = String(code || '').trim()
   if (/^[0-9a-f]{64}$/i.test(code)) return { key: code.toLowerCase(), name: '' }
-  if (code.startsWith(INVITE_PREFIX)) throw new Error("That's a group invite. Use “Join a group” for it.")
-  if (!code.startsWith(FRIEND_PREFIX)) throw new Error('Not an OpenDiscord friend code')
+  if (code.startsWith(INVITE_PREFIX) || /^opendiscord:\/\/join\//i.test(code)) throw new Error("That's a group invite. Use “Join a group” for it.")
+  if (/^opendiscord:\/\/friend\//i.test(code)) {
+    const link = parseLink(code)
+    return { key: link.key, name: link.name, token: link.token }
+  }
+  if (!code.startsWith(FRIEND_PREFIX)) throw new Error('Not an OpenDiscord friend link')
   let body
   try { body = JSON.parse(Buffer.from(code.slice(FRIEND_PREFIX.length), 'base64url').toString()) } catch { throw new Error('Friend code is damaged — copy it again') }
   if (!/^[0-9a-f]{64}$/.test(body.k || '')) throw new Error('Friend code is damaged — copy it again')
   return { key: body.k, name: String(body.n || '').slice(0, 32) }
 }
 
+// ---- one-time links (0.4) ----
+//
+// opendiscord://join/<…>   a group invite that works once
+// opendiscord://friend/<…> a friend link that works once
+//
+// Unlike the old OD1 codes, a link holds no group secret, just a random token. Members keep
+// three values derived from it in the group log (invite.create): an id, a DHT topic to wait on,
+// and an HMAC key. Whoever opens the link proves they know the token, bound to the Noise
+// session; a member who is online checks the invite is unused, records invite.used and hands
+// over the group key in a sealed box. A leaked, used link is worthless.
+
+const LINK_SCHEME = 'opendiscord://'
+
+function linkKeys (token) {
+  return {
+    id: sha256('opendiscord/invite-id/v1', token).subarray(0, 16).toString('hex'),
+    topic: sha256('opendiscord/invite-topic/v1', token),
+    key: sha256('opendiscord/invite-key/v1', token)
+  }
+}
+
+// Proof that the sender of this connection knows the token (via its derived key)
+function redeemProof (key, handshakeHash, senderPublicKey) {
+  return crypto.createHmac('sha256', key)
+    .update('opendiscord/redeem/v1')
+    .update(handshakeHash)
+    .update(senderPublicKey)
+    .digest('hex')
+}
+
+const LINK_VERSION = 1
+// join: version | token 32 | group id 16 | inviter key 32 | expiry (u32 seconds, 0 = never) | group name
+function makeJoinLink ({ token, gid, inviter, exp, name }) {
+  const head = Buffer.alloc(85)
+  head[0] = LINK_VERSION
+  token.copy(head, 1)
+  Buffer.from(gid, 'hex').copy(head, 33)
+  Buffer.from(inviter, 'hex').copy(head, 49)
+  head.writeUInt32BE(exp ? Math.floor(exp / 1000) : 0, 81)
+  return LINK_SCHEME + 'join/' + Buffer.concat([head, Buffer.from(String(name || '').slice(0, 64))]).toString('base64url')
+}
+
+// friend: version | key 32 | token 32 | name
+function makeFriendLink ({ key, token, name }) {
+  const head = Buffer.alloc(65)
+  head[0] = LINK_VERSION
+  Buffer.from(key, 'hex').copy(head, 1)
+  token.copy(head, 33)
+  return LINK_SCHEME + 'friend/' + Buffer.concat([head, Buffer.from(String(name || '').slice(0, 32))]).toString('base64url')
+}
+
+// Returns null if the text is not an opendiscord:// link at all
+function parseLink (text) {
+  const m = /^opendiscord:\/\/(join|friend)\/([A-Za-z0-9_-]+)\/?$/i.exec(String(text || '').trim())
+  if (!m) return null
+  const kind = m[1].toLowerCase()
+  const buf = Buffer.from(m[2], 'base64url')
+  if (kind === 'join') {
+    if (buf.length < 85 || buf[0] !== LINK_VERSION) throw new Error('This invite link is damaged — copy it again')
+    const exp = buf.readUInt32BE(81) * 1000
+    return {
+      kind,
+      token: Buffer.from(buf.subarray(1, 33)),
+      gid: buf.subarray(33, 49).toString('hex'),
+      inviter: buf.subarray(49, 81).toString('hex'),
+      exp: exp || null,
+      name: buf.subarray(85).toString('utf8').slice(0, 64)
+    }
+  }
+  if (buf.length < 65 || buf[0] !== LINK_VERSION) throw new Error('This friend link is damaged — copy it again')
+  return {
+    kind,
+    key: buf.subarray(1, 33).toString('hex'),
+    token: Buffer.from(buf.subarray(33, 65)),
+    name: buf.subarray(65).toString('utf8').slice(0, 32)
+  }
+}
+
 module.exports = {
   sha256, groupIdFromSecret, topicFromSecret, authTag, safeEqualHex,
   canonical, signOp, verifyOp, makeInvite, parseInvite, sealTo, openSealed,
   dmSecret, makeFriendCode, parseFriendCode,
+  linkKeys, redeemProof, makeJoinLink, makeFriendLink, parseLink,
   randomBytes: (n) => crypto.randomBytes(n),
   keyPair: (seed) => hc.keyPair(seed)
 }

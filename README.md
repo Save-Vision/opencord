@@ -11,13 +11,16 @@ directly between your computers, encrypted end to end.
 | | OpenDiscord | Discord (free tier, as of 2025) |
 |---|---|---|
 | Text channels, replies, edits, reactions, @mentions, markdown | ✅ | ✅ |
+| Threads (side panel, "also send to channel", follow + unread) | ✅ | ✅ |
+| Shared calendar (RSVP, reminders) and task board per group / private chat | ✅ | ❌ |
+| One-time invite links, "only admins can invite" | ✅ | ✅ |
 | Emoji picker, `:shortcodes:`, pinned messages, link previews | ✅ | ✅ |
 | Friends, private chats and private calls | ✅ | ✅ |
 | File sharing | ✅ any size, sent directly | 10 MB limit |
 | Code and markdown files | ✅ previewed with syntax highlighting | ✅ |
 | Voice channels | ✅ Opus up to 192 kbps | 64–96 kbps |
 | Noise suppression | ✅ RNNoise (AI), runs on your PC | ✅ Krisp |
-| Screen share | ✅ up to 4K · 60 fps, GPU-encoded (H.264/HEVC/AV1), zoomable | 720p · 30 fps |
+| Screen share | ✅ up to 4K · 60 fps, GPU-encoded (H.264/HEVC/AV1), zoomable, see who's watching | 720p · 30 fps |
 | Webcam | ✅ | ✅ |
 | Moderation: kick, admins, mute for everyone, move between channels | ✅ | ✅ |
 | Profile and group pictures | ✅ synced, visible offline | ✅ |
@@ -42,18 +45,24 @@ codec**, so you can see what you're getting.
 
 Then:
 1. Pick a display name. You can add a profile picture in Settings → My profile.
-2. One person clicks **Create a group** and copies the invite code (`OD1-…`).
-3. Send the code to your friends privately (in person, Signal, WhatsApp). **The code is the group
-   key:** anyone who has it can join and read the history.
-4. Friends click **Join with invite** and paste it. Channels and history sync as soon as anyone
-   in the group is online.
-5. If you still don't see each other after a minute, see
+2. One person clicks **Create a group**, then **Create invite link**, and sends the
+   `opendiscord://join/…` link to one friend. **Each link lets exactly one person in** and then
+   stops working (it also expires, after 7 days by default), so a forwarded link is harmless.
+   Make one link per friend.
+3. The friend clicks the link (it opens OpenDiscord), or pastes it under **Join with invite**.
+   Someone from the group has to be online at that moment: their app checks the link is unused
+   and hands over the group key, encrypted for the newcomer only. Channels and history then sync.
+4. If you still don't see each other after a minute, see
    [If you can't see each other](#if-you-cant-see-each-other). (VPNs are the usual cause.)
 
-**Friends and private chats:** click the people icon at the top of the left bar → **Add friend**.
-Copy your friend code (`ODF1-…`) and send it to your friend, or paste theirs. Their app gets the
-request directly from yours as soon as you're both online. Once they accept, you have a private
-chat with a call button. You can also add anyone you share a group with: click their name.
+The group owner and admins can switch on **Only the owner and admins can invite** in the invite
+window. Members then can't make links, and links they made earlier stop working.
+
+**Friends and private chats:** click the people icon at the top of the left bar → **Add friend** →
+**Create a friend link**, and send it. Whoever opens it first becomes your friend right away (no
+request to accept); after that the link is dead. You get a private chat with a call button, a
+shared calendar and a task list. You can also add anyone you share a group with: right-click
+their name.
 
 Tips:
 - Closing the window keeps the app running in the tray, so friends can sync messages from you.
@@ -62,11 +71,23 @@ Tips:
 - **Right-click a person** (member list, call tile, voice channel) for their volume, *Mute for
   me*, and, if you're the group's owner or an admin: *Mute for everyone*, *Move to* another voice
   channel, *Disconnect* and *Kick*. The owner can make people admins there.
-- Screen shares: scroll to **zoom** in (up to 8×) and drag to pan. Double-click (or ⤢) for fullscreen.
+- Screen shares are **opt-in**: you see "Alice is streaming" and click **Watch stream**. Your PC
+  only receives (and Alice's only sends) the video while you watch. Hover the stream for
+  **Stop watching**, fullscreen, and the stream's own volume/mute (separate from Alice's voice).
+  Whoever shares sees who is watching, on the tile and under *Voice connected*.
+- Scroll on a stream to **zoom** in (up to 8×) and drag to pan. Double-click (or ⤢) for fullscreen.
+- Hover a message → **Reply in thread**. Thread replies stay out of the channel (tick
+  *Also send to #channel* to post one in both). You get notified about threads you started or
+  replied in, and when someone @mentions you.
+- **Calendar** and **Tasks** are at the top of every group's channel list (and in the header of a
+  private chat). Events have a time, place, details, RSVPs and a desktop reminder; tasks move
+  between *To do / Doing / Done* by drag and drop and have an assignee, a due date and a checklist.
+  Everyone in the group sees and can edit them, also offline, like messages.
 - Type `:` and a name (`:fire`) for emoji. Hover a message to **pin** it; pins are in the 📌 menu.
 - Settings → Voice & audio → **Noise suppression**: *AI (RNNoise)* (default) removes fans, keyboard
   clicks and hum. Use *Hear yourself* next to the mic meter to check it.
-- Settings → **Storage** moves your data (identity, history, files) to another folder or drive.
+- Settings → **Storage** shows what takes up space, removes files friends sent (they can be
+  downloaded again), and moves your data (identity, history, files) to another folder or drive.
 - Settings → Privacy → **Link previews** turns off fetching previews for links you send.
 
 ## How it works
@@ -106,6 +127,18 @@ Tips:
   between your identity keys. Nobody else can compute it, and both apps refuse anyone but the two
   of you even if the key leaked. A friend code is just your public key and name, so it's safe to
   share. Every app listens on its own key, which is how a friend request reaches you directly.
+- **One-time invite links** contain a random token, never the group key. The member who makes one
+  publishes `invite.create` (the token's hash-derived id, a rendezvous topic and a check key) in
+  the group's log, so every member can let the guest in. The guest connects to whoever is online
+  on that topic and proves it holds the token (an HMAC bound to the connection). A member who sees
+  the invite unused appends a signed `invite.used` op (which syncs, so a second redeem fails
+  everywhere) and sends the group key sealed to the guest's identity key. Friend links work the
+  same way, app to app.
+- **Storage:** each group's log is kept as Brotli-compressed segments plus a small plain-text tail
+  (about 4× smaller than raw JSON). Deleting a message, editing it again, or changing your picture
+  marks the older ops as superseded; two days later they're replaced by small signed "stubs" that
+  keep the log's numbering intact, so the deleted text and old pictures are really gone from every
+  disk. Files from friends can be cleaned up and re-downloaded on demand.
 - **Roles and kicking:** whoever creates a group is its owner (pinned by the first, signed op).
   The owner can make members admins. Owner and admins can kick, mute for everyone and move people.
   A **kick rotates the group key**: the new key is sealed to each remaining member's identity key
@@ -164,11 +197,17 @@ Without relays, a direct connection needs at least one of you to be on a "hole-p
 
 - History lives only on members' devices. If nobody who has a message is online, a newcomer has
   to wait. History on disk is **not encrypted at rest**, so use BitLocker/FileVault.
-- Anyone with the invite code can join. Kicking someone cuts them off and changes the key, but
-  they keep the messages and files they already had. Nothing can take back data from a PC.
+- A member hands out the group key when letting someone in, so a group is only as private as its
+  least careful member. Kicking someone cuts them off and changes the key, but they keep the
+  messages and files they already had. Nothing can take back data from a PC.
+- If two people open the *same* invite link at the same moment and reach two *different* members,
+  both may get in (each member only sees the other's `invite.used` a moment later). With one link
+  per friend this doesn't come up. Old `OD1-…` codes from before 0.4 still work until the next
+  kick changes the key, because they are the key.
 - If the owner loses their data folder, nobody can promote new admins (existing admins keep
   their powers). Back up the folder (Settings → Storage shows where it is).
-- No push-to-talk (toggle hotkeys instead), search, threads, custom emoji, bots or mobile app.
+- No push-to-talk (toggle hotkeys instead), search, custom emoji, bots or mobile app. Reminders
+  only fire while the app is running (it keeps running in the tray by default).
 - A mesh is perfect for 3–5 people. For 10+ in one call you'd want an SFU (a server).
 - System-audio capture when screen sharing (Windows) captures *all* sound, including friends'
   voices, so they may hear themselves. It's off by default.
@@ -205,8 +244,8 @@ npm install
 npm start                 # run the app
 npm run dev:alice         # isolated profiles to simulate several friends on one PC
 npm run dev:bob
-npm test                  # headless tests: sync, gossip, auth, forged messages, files, kick, friends
-npm run test:e2e          # drives two real app instances through every feature (chat, files, call, friends…)
+npm test                  # headless tests: sync, gossip, auth, forged messages, files, kick, friends, one-time links, stubs
+npm run test:e2e          # drives two real app instances through every feature (chat, threads, planner, call, friends…)
 npm run dist              # Windows installer + portable .exe into dist/
 npm run test:update       # after dist: update flow against a local feed (never installs anything)
 ```
@@ -217,22 +256,22 @@ Screenshots go to `test/screenshots/` (gitignored, because they can contain your
 
 ```
 src/main/          Electron main process
-  crypto.js        invite and friend codes, membership HMAC, op signatures, sealed boxes, DM keys
-  store.js         identity, settings, friends, roles/kicks, per-group signed op log, blob store
-  network.js       Hyperswarm connections, auth, sync/gossip, friend requests, file transfer
+  crypto.js        one-time links, membership HMAC, op signatures, sealed boxes, DM keys
+  store.js         identity, settings, friends, roles/kicks, invites, compressed op log + stubs, blob store
+  network.js       Hyperswarm connections, auth, sync/gossip, invite redemption, friend requests, file transfer
   linkpreview.js   builds link previews (OpenGraph, YouTube oEmbed) for links you send
   datadir.js       choosing and moving the data folder
   updater.js       self-update from GitHub releases
   framing.js       length-prefixed JSON/binary frames
-  main.js          window, IPC, custom protocols, screen-capture picker
+  main.js          window, IPC, custom protocols, opendiscord:// links, screen-capture picker
 src/preload/       the narrow API the UI is allowed to call
 src/renderer/      UI (Preact + htm, no build step)
-  lib/model.js     derives channels/messages/reactions/pins/roles from ops
+  lib/model.js     derives channels/messages/threads/reactions/pins/roles/events/tasks from ops
   lib/voice.js     WebRTC mesh, codecs, bitrates, speaking detection, moderation, stats
   lib/denoise.js   RNNoise noise suppression (AudioWorklet: lib/rnnoise-worklet.js)
   lib/markdown.js  chat markdown and full markdown documents
   lib/highlight.js syntax highlighting for code blocks and code files
-  views/           chat, call stage, friends, members/context menu, emoji picker, modals
+  views/           chat + threads, call stage, calendar/tasks, friends, members, emoji picker, modals
 ```
 
 Third-party pieces shipped with the app: [RNNoise](https://github.com/xiph/rnnoise) via

@@ -8,6 +8,11 @@
 //
 // Authorization: being connected is not enough — each side must prove it knows the group
 // secret with an HMAC bound to this connection's Noise handshake hash.
+//
+// One-time invites (0.4): members wait on each unused invite's topic. A guest connects there
+// (or straight to the inviter), proves they hold the link's token ('redeem'), and a member who
+// finds the invite unused records invite.used and replies 'admit' with the group key sealed to
+// the guest. From then on the guest is an ordinary member.
 const fs = require('fs')
 const os = require('os')
 const dgram = require('dgram')
@@ -17,7 +22,8 @@ const Hyperswarm = require('hyperswarm')
 const c = require('./crypto')
 const { encodeJSON, encodeBlobChunk, FrameParser } = require('./framing')
 
-const PROTOCOL_VERSION = 1
+// 2 (0.4): stubs in sync, one-time invites and friend links
+const PROTOCOL_VERSION = 2
 const SYNC_BATCH_BYTES = 1024 * 1024
 const BLOB_CHUNK = 64 * 1024
 const BLOB_IDLE_TIMEOUT = 30000
@@ -78,6 +84,8 @@ class Network extends EventEmitter {
     this.discoveries = new Map() // groupId -> Map(topicHex -> hyperswarm discovery session)
     this.failures = new Map() // remoteKeyHex -> { code, message, at, count }
     this.friendQueue = new Set() // keys we owe a friend request until they confirm receipt
+    this.inviteTopics = new Map() // topicHex -> discovery: unused invites of our groups
+    this.joining = new Map() // inviteId -> { topic, key, inviter, discovery }: links we're redeeming
   }
 
   async start () {
@@ -102,6 +110,8 @@ class Network extends EventEmitter {
     await this.swarm.listen().catch((err) => console.warn('[net] listen', err.message))
     for (const g of this.store.groups.values()) this._join(g)
     for (const key of this.store.pendingOutgoing()) this.sendFriendRequest(key)
+    this.refreshInvites()
+    for (const j of Object.values(this.store.joins)) this.startJoin(j)
     // Hyperswarm only re-runs lookups every ~10 min, and stops retrying a peer after a few
     // failed hole punches. While a group has nobody connected, look again every minute so a
     // friend who just came online (or fixed their network) is found quickly.
@@ -121,6 +131,63 @@ class Network extends EventEmitter {
       try { this.swarm.leavePeer(pk) } catch {}
       this.swarm.joinPeer(pk)
     }
+    // Invites expire; and a pending join keeps looking for a member who is online
+    this.refreshInvites()
+    for (const j of this.joining.values()) {
+      j.discovery?.refresh().catch(() => {})
+      if (!this.peers.has(j.inviter)) {
+        const pk = Buffer.from(j.inviter, 'hex')
+        try { this.swarm.leavePeer(pk) } catch {}
+        this.swarm.joinPeer(pk)
+      }
+    }
+  }
+
+  // ---- one-time invites ----
+
+  // Wait on the topic of every unused invite in our groups, leave the others
+  refreshInvites () {
+    if (!this.swarm) return
+    const want = new Set()
+    for (const g of this.store.groups.values()) for (const inv of this.store.activeInvites(g)) want.add(inv.topic)
+    for (const [hex] of this.inviteTopics) {
+      if (want.has(hex)) continue
+      this.inviteTopics.delete(hex)
+      this.swarm.leave(Buffer.from(hex, 'hex')).catch(() => {})
+    }
+    for (const hex of want) {
+      if (!this.inviteTopics.has(hex)) this.inviteTopics.set(hex, this.swarm.join(Buffer.from(hex, 'hex'), { server: true, client: false }))
+    }
+  }
+
+  // Guest side: look for members on the invite topic and ring the inviter directly
+  startJoin (j) {
+    if (this.joining.has(j.id)) return
+    if (j.exp && j.exp < Date.now()) {
+      this.store.dropJoin(j.id)
+      this.emit('join-failed', j.id, 'expired', j)
+      return
+    }
+    const { key, topic } = this.store.joinKeys(j)
+    const entry = { id: j.id, key, topic, inviter: j.inviter, gid: j.gid, name: j.name }
+    this.joining.set(j.id, entry)
+    entry.discovery = this.swarm.join(topic, { server: false, client: true })
+    if (j.inviter !== this.store.myKey) this.swarm.joinPeer(Buffer.from(j.inviter, 'hex'))
+    for (const peer of this.peers.values()) if (peer.proto >= 2) this._sendRedeem(peer, entry)
+  }
+
+  cancelJoin (id) {
+    const j = this.joining.get(id)
+    if (!j) return
+    this.joining.delete(id)
+    this.swarm.leave(j.topic).catch(() => {})
+    if (!this.friendQueue.has(j.inviter)) {
+      try { this.swarm.leavePeer(Buffer.from(j.inviter, 'hex')) } catch {}
+    }
+  }
+
+  _sendRedeem (peer, j) {
+    this._send(peer, { t: 'redeem', id: j.id, proof: c.redeemProof(j.key, peer.hh, this.store.keyPair.publicKey) })
   }
 
   // Announce every key epoch's topic: the current one for everyone, older ones so members who
@@ -196,9 +263,11 @@ class Network extends EventEmitter {
 
   joinGroup (group) {
     this._join(group)
+    // Prove membership first: _evaluate may send 'sync', which the peer ignores until it has
+    // seen our tags (matters when we were already connected, e.g. a guest who was just let in)
     for (const peer of this.peers.values()) {
-      this._evaluate(peer)
       this._send(peer, { t: 'auth', tags: this._myTags(peer) })
+      this._evaluate(peer)
     }
   }
 
@@ -230,7 +299,15 @@ class Network extends EventEmitter {
 
   _sendFriend (peer) {
     const me = this.store.identity
-    this._send(peer, { t: 'friend', name: me.name, color: me.color })
+    const msg = { t: 'friend', name: me.name, color: me.color }
+    // Opened their one-time friend link: prove it, so they accept us right away
+    const tok = this.store.friendToken(peer.key)
+    if (tok) {
+      const keys = c.linkKeys(tok)
+      msg.inv = keys.id
+      msg.proof = c.redeemProof(keys.key, peer.hh, this.store.keyPair.publicKey)
+    }
+    this._send(peer, msg)
   }
 
   // ---- sending ----
@@ -245,7 +322,11 @@ class Network extends EventEmitter {
   }
 
   broadcastOps (groupId, ops, exceptKey = null) {
-    for (const p of this.peersIn(groupId)) if (p.key !== exceptKey) this._send(p, { t: 'ops', g: groupId, ops })
+    for (const p of this.peersIn(groupId)) {
+      if (p.key === exceptKey) continue
+      const w = this.store.wire(groupId, ops, { stubs: p.proto >= 2 })
+      if (w.ops.length) this._send(p, { t: 'ops', g: groupId, ops: w.ops, proofs: w.proofs.length ? w.proofs : undefined })
+    }
   }
 
   sendEphemeral (groupId, to, data) {
@@ -287,6 +368,7 @@ class Network extends EventEmitter {
       hh: conn.handshakeHash,
       groups: new Set(),
       remoteTags: new Set(),
+      proto: 0, // their protocol version, from hello
       host: raw.remoteHost,
       family: raw.remoteFamily,
       rtt: null,
@@ -370,7 +452,11 @@ class Network extends EventEmitter {
       switch (msg.t) {
         case 'hello':
         case 'auth':
-          if (msg.t === 'hello' && typeof msg.app === 'string' && /^\d+\.\d+\.\d+[\w.-]{0,20}$/.test(msg.app)) peer.appVersion = msg.app
+          if (msg.t === 'hello') {
+            if (typeof msg.app === 'string' && /^\d+\.\d+\.\d+[\w.-]{0,20}$/.test(msg.app)) peer.appVersion = msg.app
+            peer.proto = Number.isInteger(msg.v) ? msg.v : 1
+            if (peer.proto >= 2) for (const j of this.joining.values()) this._sendRedeem(peer, j)
+          }
           if (!Array.isArray(msg.tags)) return
           peer.remoteTags = new Set(msg.tags.slice(0, 512).filter(t => typeof t === 'string'))
           this._evaluate(peer)
@@ -378,13 +464,59 @@ class Network extends EventEmitter {
         case 'ping':
           this._send(peer, { t: 'pong', ts: msg.ts })
           return
-        case 'friend': // may come from someone we share nothing with yet
+        case 'friend': { // may come from someone we share nothing with yet
+          if (typeof msg.inv === 'string') {
+            const r = this.store.checkFriendLink(peer.key, msg.inv, msg.proof, peer.hh)
+            if (r !== 'accept') { this._send(peer, { t: 'friend.no', reason: r }); return }
+            const g = this.store.acceptFromLink(peer.key, { name: msg.name })
+            this._send(peer, { t: 'friend.ok' })
+            this.joinGroup(g)
+            this.emit('friend-linked', peer.key, g)
+            return
+          }
           if (this.store.receiveFriendRequest(peer.key, { name: msg.name, color: msg.color })) this.emit('friend-request', peer.key)
           this._send(peer, { t: 'friend.ok' })
           return
+        }
         case 'friend.ok':
           this.cancelFriendRequest(peer.key)
           return
+        case 'friend.no':
+          if (!this.friendQueue.has(peer.key)) return
+          this.cancelFriendRequest(peer.key)
+          this.emit('friend-rejected', peer.key, ['used', 'expired'].includes(msg.reason) ? msg.reason : 'invalid')
+          return
+        case 'redeem': { // a guest with a one-time invite; not a member (yet)
+          const r = this.store.redeem(peer.key, msg.id, msg.proof, peer.hh)
+          if (r.reason) {
+            if (r.reason !== 'unknown') this._send(peer, { t: 'redeem.no', id: msg.id, reason: r.reason })
+            return
+          }
+          if (r.op) {
+            this.broadcastOps(r.group.id, [r.op])
+            this.emit('ops', r.group.id, [r.op])
+            this.refreshInvites()
+          }
+          this._send(peer, { t: 'admit', id: msg.id, box: this.store.admitBox(r.group, peer.key) })
+          return
+        }
+        case 'admit': {
+          if (!this.joining.has(msg.id)) return
+          const res = this.store.admitted(msg.id, msg.box)
+          if (!res) return
+          this.cancelJoin(msg.id)
+          this.joinGroup(res.group)
+          this.emit('joined', msg.id, res)
+          return
+        }
+        case 'redeem.no': {
+          if (!this.joining.has(msg.id) || !['used', 'expired', 'revoked', 'denied'].includes(msg.reason)) return
+          const j = this.store.joins[msg.id]
+          this.cancelJoin(msg.id)
+          this.store.dropJoin(msg.id)
+          this.emit('join-failed', msg.id, msg.reason, j)
+          return
+        }
         case 'pong':
           if (typeof msg.ts === 'number') {
             peer.rtt = Math.max(0, Date.now() - msg.ts)
@@ -398,28 +530,33 @@ class Network extends EventEmitter {
       switch (msg.t) {
         case 'sync': {
           if (!peer.groups.has(msg.g)) return
-          const missing = this.store.opsMissingFrom(msg.g, msg.vec)
+          const missing = this.store.opsMissingFrom(msg.g, msg.vec, { stubs: peer.proto >= 2 })
+          const flush = (batch) => {
+            const w = this.store.wire(msg.g, batch)
+            this._send(peer, { t: 'ops', g: msg.g, ops: w.ops, proofs: w.proofs.length ? w.proofs : undefined })
+          }
           let batch = []
           let bytes = 0
           for (const op of missing) {
             batch.push(op)
             bytes += 300 + JSON.stringify(op.d).length
             if (bytes > SYNC_BATCH_BYTES) {
-              this._send(peer, { t: 'ops', g: msg.g, ops: batch })
+              flush(batch)
               batch = []
               bytes = 0
             }
           }
-          if (batch.length) this._send(peer, { t: 'ops', g: msg.g, ops: batch })
+          if (batch.length) flush(batch)
           return
         }
         case 'ops': {
           if (!peer.groups.has(msg.g)) return
-          const { accepted, gap, membership } = this.store.ingest(msg.g, msg.ops)
+          const { accepted, gap, membership } = this.store.ingest(msg.g, msg.ops, msg.proofs)
           if (membership) this.membershipChanged(msg.g)
           if (accepted.length) {
             this.emit('ops', msg.g, accepted)
             this.broadcastOps(msg.g, accepted, peer.key) // gossip to friends who may lack them
+            if (accepted.some(op => op.k.startsWith('invite.') || op.k === 'group.settings' || op.k === 'member.role')) this.refreshInvites()
           }
           if (gap) {
             const last = peer.lastGapSync.get(msg.g) || 0

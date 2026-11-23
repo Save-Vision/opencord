@@ -6,6 +6,10 @@
 // Each connection has four fixed transceivers, negotiated once:
 //   0 mic audio · 1 screen video · 2 screen audio · 3 camera video
 // Starting/stopping a share is just replaceTrack(), no renegotiation round-trip.
+//
+// Screen shares are opt-in: nobody receives one until they click "Watch". Your voice state
+// lists whose streams you watch (`watch`), and a sharer only puts the screen tracks on the
+// connections of people who watch, so an unwatched stream costs no upload at all.
 
 import { getMic, stopMic, isDenoised } from './denoise.js'
 
@@ -128,6 +132,7 @@ export class Voice {
     this.calls = new Map()
     this.local = { mic: null, screen: null, cam: null }
     this.screenOpts = null
+    this.watching = new Set() // keys of sharers whose stream I watch
     this.muted = false
     this.deafened = false
     this.mutedBeforeDeafen = false
@@ -199,6 +204,7 @@ export class Voice {
     this.speaking.clear()
     this.active = null
     this.screenOpts = null
+    this.watching.clear()
     clearInterval(this.meterTimer)
     clearInterval(this.statsTimer)
     this.api.sendEph(gid, null, { type: 'voice', ch: null })
@@ -218,6 +224,8 @@ export class Voice {
       deaf: this.deafened,
       screen: !!this.local.screen,
       screenLabel: this.screenOpts ? SCREEN_PRESETS[this.screenOpts.preset]?.label : null,
+      screenAudio: !!this.local.screen?.getAudioTracks().length,
+      watch: [...this.watching],
       cam: !!this.local.cam
     }
   }
@@ -237,12 +245,40 @@ export class Voice {
         if (call) this._closeCall(call)
         this._ensureCall(key, st)
         playTone('connect')
+      } else {
+        // they started or stopped watching my stream
+        const was = call.sendingScreen
+        this._attachLocalTracks(call)
+        if (!was && call.sendingScreen) this._applySenderParams(call, 1)
       }
     } else if (call) {
       this._closeCall(call)
       playTone('leave')
     }
+    // Their share ended (or they left): stop watching, so a new share doesn't auto-connect
+    if (this.watching.has(key) && !(st.ch === this.active.ch && st.screen)) this.unwatchScreen(key)
     this.model.emit()
+  }
+
+  // ---------- watching streams ----------
+
+  watchScreen (key) {
+    if (!this.active || this.watching.has(key)) return
+    this.watching.add(key)
+    this._broadcastState()
+    this.model.emit()
+  }
+
+  unwatchScreen (key) {
+    if (!this.watching.delete(key)) return
+    this._broadcastState()
+    this.model.emit()
+  }
+
+  _remoteWatchesMe (key) {
+    const g = this.active && this.model.groups.get(this.active.gid)
+    const st = g?.voice.get(key)
+    return !!st && st.ch === this.active.ch && Array.isArray(st.watch) && st.watch.includes(this.myKey)
   }
 
   // A moderator moved us to another voice channel (ch) or disconnected us (ch = null).
@@ -293,6 +329,7 @@ export class Voice {
   onPeerOffline (gid, key) {
     const call = this.calls.get(key)
     if (call && this.active?.gid === gid) this._closeCall(call)
+    if (this.active?.gid === gid) this.unwatchScreen(key)
   }
 
   onRtc (gid, key, msg) {
@@ -410,17 +447,19 @@ export class Voice {
     }
   }
 
-  _localTracks () {
+  _localTracks (withScreen = true) {
     return [
       this.local.mic?.getAudioTracks()[0] || null,
-      this.local.screen?.getVideoTracks()[0] || null,
-      this.local.screen?.getAudioTracks()[0] || null,
+      (withScreen && this.local.screen?.getVideoTracks()[0]) || null,
+      (withScreen && this.local.screen?.getAudioTracks()[0]) || null,
       this.local.cam?.getVideoTracks()[0] || null
     ]
   }
 
+  // The screen tracks only go to people who are watching
   _attachLocalTracks (call) {
-    const tracks = this._localTracks()
+    const tracks = this._localTracks(this._remoteWatchesMe(call.key))
+    call.sendingScreen = !!tracks[1]
     call.transceivers.forEach((t, i) => {
       if (t.sender.track !== tracks[i]) t.sender.replaceTrack(tracks[i]).catch(err => console.warn('[rtc] replaceTrack', err))
     })
@@ -471,12 +510,14 @@ export class Voice {
     if (!slot) return
     call.remote[slot] = e.track
     call.remoteStreams[slot] = new MediaStream([e.track])
+    // remote tracks are "muted" until media arrives; the screen tile waits for that
+    e.track.onmute = e.track.onunmute = () => this.model.emit()
     if (slot === 'mic' || slot === 'screenAudio') {
       const el = new Audio()
       el.autoplay = true
       el.srcObject = call.remoteStreams[slot]
       call.audioEls[slot] = el
-      this._applyOutput(call.key, el)
+      this._applyOutput(call.key, el, slot)
       el.play().catch(() => {})
       if (slot === 'mic') {
         this._ensureAudioCtx()
@@ -517,24 +558,29 @@ export class Voice {
   }
 
   applyOutputDevice () {
-    for (const call of this.calls.values()) for (const el of Object.values(call.audioEls)) this._applyOutput(call.key, el)
+    for (const call of this.calls.values()) for (const [slot, el] of Object.entries(call.audioEls)) this._applyOutput(call.key, el, slot)
   }
 
-  _applyOutput (key, el) {
-    const vol = this.settings.volumes?.[key]
+  // A friend's voice and their stream's sound have separate volume and mute settings.
+  _applyOutput (key, el, slot = 'mic') {
+    const screen = slot === 'screenAudio'
+    const vol = screen ? this.settings.screenVolumes?.[key] : this.settings.volumes?.[key]
     el.volume = Math.max(0, Math.min(1, vol == null ? 1 : vol))
     // Muted for me, or muted by a moderator: every listener enforces a server mute itself, so
     // it holds even against a modified client.
     const g = this.active && this.model.groups.get(this.active.gid)
-    el.muted = this.deafened || !!this.settings.localMutes?.[key] || (!!g && this.model.isServerMuted(g, key))
+    const mine = screen ? !!this.settings.screenMutes?.[key] : !!this.settings.localMutes?.[key]
+    el.muted = this.deafened || mine || (!!g && this.model.isServerMuted(g, key))
     const out = this.settings.audio.outputId
     if (el.setSinkId && out) el.setSinkId(out === 'default' ? '' : out).catch(() => {})
   }
 
-  setVolume (key, vol) {
-    const call = this.calls.get(key)
-    if (call) for (const el of Object.values(call.audioEls)) el.volume = vol
+  setVolume (key, vol, slot = 'mic') {
+    const el = this.calls.get(key)?.audioEls[slot]
+    if (el) el.volume = vol
   }
+
+  screenMuted (key) { return !!this.settings.screenMutes?.[key] }
 
   _applyMute () {
     const t = this.local.mic?.getAudioTracks()[0]

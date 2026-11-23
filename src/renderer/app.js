@@ -2,8 +2,9 @@ import { html, render, useState, useEffect, useRef } from './vendor/preact-htm.j
 import { api, model, voice, useModel, act, initials, handleNewOps, onBlobProgress, retryMissingBlobs } from './lib/core.js'
 import { shortKey, HOME, DM_CALL } from './lib/model.js'
 import { Icon } from './lib/icons.js'
-import { ChatView, Avatar, leaveGroupFlow } from './views/chat.js'
-import { VoiceStage, participantsOf, connLabel, MuteIcons } from './views/stage.js'
+import { ChatView, Avatar, leaveGroupFlow, ThreadPanel } from './views/chat.js'
+import { PlannerView, startReminders, myOpenTasks, eventsToday } from './views/planner.js'
+import { VoiceStage, participantsOf, viewersOf, connLabel, MuteIcons } from './views/stage.js'
 import { Modals, ProfileEditor } from './views/modals.js'
 import { NetworkHealth } from './views/nethealth.js'
 import { initUpdates, UpdatePill } from './views/updates.js'
@@ -18,6 +19,8 @@ function App () {
   const home = model.ui.gid === HOME || !!g?.dm
   const stage = model.ui.stage && g && model.ui.stage.gid === g.id ? g.channels.get(model.ui.stage.ch) : null
   const ch = g ? model.currentChannel(g) : null
+  const planner = !stage && g && model.ui.planner?.gid === g.id
+  const thread = !stage && !planner && g && model.ui.thread?.gid === g.id
 
   useEffect(() => {
     let total = 0
@@ -44,11 +47,13 @@ function App () {
             ? html`<${Welcome} />`
             : stage && !stage.deleted
               ? html`<${VoiceStage} g=${g} ch=${stage} />`
-              : ch
-                ? html`<${ChatView} g=${g} ch=${ch} />`
-                : html`<${Syncing} g=${g} />`}
+              : planner
+                ? html`<${PlannerView} g=${g} />`
+                : ch
+                  ? html`<${ChatView} g=${g} ch=${ch} />`
+                  : html`<${Syncing} g=${g} />`}
       </main>
-      ${g && !stage && (g.dm ? html`<${DmProfile} g=${g} />` : html`<${Members} g=${g} />`)}
+      ${g && !stage && !planner && (thread ? html`<${ThreadPanel} key=${model.ui.thread.id} g=${g} />` : g.dm ? html`<${DmProfile} g=${g} />` : html`<${Members} g=${g} />`)}
     </div>
     <${CallBanner} />
     <${MemberMenu} />
@@ -101,6 +106,13 @@ function Rail ({ home }) {
             </button>
           </div>`
       })}
+      ${model.joins.filter(j => !model.groups.has(j.gid)).map(j => html`
+        <div key=${'j' + j.id} class="rail-item joining">
+          <button class="rail-btn" title=${`Joining ${j.name || 'a group'}… someone from the group needs to be online`} onClick=${() => model.openModal('addGroup', { tab: 'join' })}>
+            <span class="group-initials">${initials(j.name || '?')}</span>
+            <span class="rail-spin" />
+          </button>
+        </div>`)}
       ${groups.length > 0 && html`<div class="rail-sep" />`}
       <div class="rail-item">
         <button class="rail-btn add" title="Create or join a group" onClick=${() => model.openModal('addGroup')}><${Icon} name="plus" size=${22} /></button>
@@ -118,7 +130,9 @@ function GroupMenu ({ g, onClose }) {
   const item = (icon, label, fn, cls = '') => html`<button class=${cls} onClick=${() => { onClose(); fn() }}><span>${label}</span><${Icon} name=${icon} size=${16} /></button>`
   return html`
     <div class="dropdown" ref=${ref}>
-      ${item('userPlus', 'Invite people', () => model.openModal('invite', { gid: g.id }), 'accent')}
+      ${model.canInvite(g) && item('userPlus', 'Invite people', () => model.openModal('invite', { gid: g.id }), 'accent')}
+      ${item('calendar', 'Calendar', () => model.openPlanner(g.id, 'calendar'))}
+      ${item('tasks', 'Tasks', () => model.openPlanner(g.id, 'tasks'))}
       ${item('hash', 'Create text channel', () => model.openModal('channel', { gid: g.id, kind: 'text' }))}
       ${item('speaker', 'Create voice channel', () => model.openModal('channel', { gid: g.id, kind: 'voice' }))}
       ${item('edit', 'Rename group', () => model.openModal('renameGroup', { gid: g.id }))}
@@ -132,7 +146,10 @@ function Sidebar ({ g, ch, stage, footer }) {
   const [menu, setMenu] = useState(false)
   const text = model.channelsOf(g, 'text')
   const voiceChs = model.channelsOf(g, 'voice')
+  const planner = !stage && model.ui.planner?.gid === g.id ? model.ui.planner.tab : null
   const openText = (c) => { model.ui.stage = null; model.selectChannel(g.id, c.id) }
+  const today = eventsToday(g)
+  const mine = myOpenTasks(g)
   const openVoice = (c) => {
     model.ui.stage = { gid: g.id, ch: c.id }
     model.emit()
@@ -148,11 +165,19 @@ function Sidebar ({ g, ch, stage, footer }) {
       </header>
       ${menu && html`<${GroupMenu} g=${g} onClose=${() => setMenu(false)} />`}
       <div class="channels">
-        <button class="invite-cta" onClick=${() => model.openModal('invite', { gid: g.id })}><${Icon} name="userPlus" size=${16} /> Invite friends</button>
+        ${model.canInvite(g) && html`<button class="invite-cta" onClick=${() => model.openModal('invite', { gid: g.id })}><${Icon} name="userPlus" size=${16} /> Invite friends</button>`}
+        <button class="channel planner-link ${planner === 'calendar' ? 'active' : ''}" onClick=${() => model.openPlanner(g.id, 'calendar')}>
+          <${Icon} name="calendar" size=${18} class="dim" /><span class="ch-name">Calendar</span>
+          ${today > 0 && html`<span class="soft-badge" title="Events today">${today} today</span>`}
+        </button>
+        <button class="channel planner-link ${planner === 'tasks' ? 'active' : ''}" onClick=${() => model.openPlanner(g.id, 'tasks')}>
+          <${Icon} name="tasks" size=${18} class="dim" /><span class="ch-name">Tasks</span>
+          ${mine > 0 && html`<span class="soft-badge" title="Open tasks assigned to you">${mine}</span>`}
+        </button>
         <div class="section-head"><span>Text channels</span><button class="icon-btn small" title="Create text channel" onClick=${() => model.openModal('channel', { gid: g.id, kind: 'text' })}><${Icon} name="plus" size=${16} /></button></div>
         ${text.map((c) => {
           const u = model.unread(g, c.id)
-          const active = !stage && ch?.id === c.id
+          const active = !stage && !planner && ch?.id === c.id
           return html`
             <button key=${c.id} class="channel ${active ? 'active' : ''} ${u.count ? 'unread' : ''}" onClick=${() => openText(c)}>
               <${Icon} name="hash" size=${18} class="dim" /><span class="ch-name">${c.name}</span>
@@ -172,11 +197,14 @@ function Sidebar ({ g, ch, stage, footer }) {
               ${keys.map((k) => {
                 const me = k === model.me.key
                 const st = me ? voice.statePayload() : g.voice.get(k) || {}
+                const watches = (st.watch || []).filter(w => keys.includes(w))
+                const viewers = st.screen ? viewersOf(g, c.id, k).length : 0
                 return html`
                   <div key=${k} class="voice-user ${voice.speaking.has(k) ? 'speaking' : ''}" onContextMenu=${(e) => openMemberMenu(e, g, k)} title="Right-click for options">
                     <${Avatar} name=${model.memberName(g, k)} color=${model.memberColor(g, k)} src=${model.memberAvatar(g, k)} size=${22} speaking=${voice.speaking.has(k)} />
                     <span class="vu-name">${model.memberName(g, k)}</span>
-                    ${st.screen && html`<span class="live">LIVE</span>`}
+                    ${watches.length > 0 && html`<span class="vu-watch" title=${'Watching ' + watches.map(w => w === model.me.key ? 'your' : model.memberName(g, w) + "'s").join(', ') + ' stream'}><${Icon} name="eye" size=${13} /></span>`}
+                    ${st.screen && html`<span class="live" title=${viewers ? viewers + ' watching' : 'Nobody watching'}>LIVE${viewers ? ' · ' + viewers : ''}</span>`}
                     ${st.cam && html`<${Icon} name="camera" size=${14} class="dim" />`}
                     <${MuteIcons} g=${g} k=${k} st=${st} />
                   </div>`
@@ -212,11 +240,22 @@ function VoicePanel () {
         <button class="icon-btn" title="Disconnect" onClick=${() => voice.leave()}><${Icon} name="leave" size=${18} /></button>
       </div>
       ${voice.serverMuted && html`<div class="vp-note"><${Icon} name="micOff" size=${13} /> A moderator muted you</div>`}
+      ${voice.local.screen && g && html`<${StreamWatchers} g=${g} />`}
       <div class="vp-actions">
         <button class="btn ${voice.local.cam ? 'on' : ''}" onClick=${() => voice.toggleCamera()} title="Camera"><${Icon} name=${voice.local.cam ? 'camera' : 'cameraOff'} size=${18} /></button>
         <button class="btn ${voice.local.screen ? 'on' : ''}" onClick=${() => voice.local.screen ? voice.stopScreen() : model.openModal('screen')} title=${voice.local.screen ? 'Stop sharing' : 'Share screen'}><${Icon} name="screenUp" size=${18} /></button>
         <button class="btn" onClick=${open} title="Open call view"><${Icon} name="maximize" size=${18} /></button>
       </div>
+    </div>`
+}
+
+// While you share: who is watching
+function StreamWatchers ({ g }) {
+  const keys = viewersOf(g, voice.active.ch, model.me.key)
+  return html`
+    <div class="vp-note watchers" title=${keys.map(k => model.memberName(g, k)).join(', ')}>
+      <${Icon} name="eye" size=${13} />
+      ${keys.length ? html`<span>${keys.length <= 3 ? keys.map(k => model.memberName(g, k)).join(', ') : keys.length + ' people'} watching your stream</span>` : html`<span>Nobody is watching your stream yet</span>`}
     </div>`
 }
 
@@ -250,7 +289,7 @@ function Welcome () {
     <div class="center-card welcome">
       <div class="hero-mark"><span /><span /><span /></div>
       <h1>Hey ${model.me.name}!</h1>
-      <p>Create a group for you and your friends, join one with an invite code, or add a friend for private chats and calls. Everything goes straight from device to device — no accounts, no servers, no upload limits.</p>
+      <p>Create a group for you and your friends, join one with an invite link, or add a friend for private chats and calls. Everything goes straight from device to device — no accounts, no servers, no upload limits.</p>
       <div class="row center">
         <button class="btn primary lg" onClick=${() => model.openModal('addGroup', { tab: 'create' })}>Create a group</button>
         <button class="btn lg" onClick=${() => model.openModal('addGroup', { tab: 'join' })}>Join with invite</button>
@@ -294,9 +333,29 @@ async function boot () {
   model.profile = init.profile
   model.version = init.version
   model.setFriends(init.friends)
+  model.setJoins(init.joins)
   document.body.classList.add('platform-' + init.platform)
   for (const g of init.groups) model.addGroup(g)
   for (const p of init.peers) for (const gid of p.groups) model.peerJoin(gid, p.key, p)
+  if (init.link) setTimeout(() => model.openModal('openLink', { url: init.link }), 300)
+
+  // A one-time invite was accepted, or someone opened our friend link
+  api.on('group-added', (payload, info) => {
+    const isNew = !model.groups.has(payload.id)
+    model.addGroup(payload)
+    const g = model.groups.get(payload.id)
+    if (info?.joined && isNew) {
+      model.ui.stage = null
+      model.selectGroup(g.id)
+      model.toast(`You joined ${model.groupName(g)}!`)
+    } else if (g.dm && isNew) {
+      model.toast(`You and ${model.groupName(g)} are friends now`)
+    }
+  })
+  api.on('group-removed', (gid) => model.removeGroup(gid))
+  api.on('joins', (list) => model.setJoins(list))
+  api.on('notice', (n) => model.toast(n.text, n.kind))
+  api.on('open-link', (url) => model.openModal('openLink', { url }))
 
   api.on('ops', (gid, ops) => {
     if (!model.groups.has(gid)) return
@@ -357,6 +416,7 @@ async function boot () {
   })
   window.addEventListener('beforeunload', () => voice.leave(true))
   window.__od = { model, voice } // handy for poking around in DevTools (Ctrl+Shift+I)
+  startReminders({ api })
 
   render(html`<${App} />`, document.getElementById('root'))
 }

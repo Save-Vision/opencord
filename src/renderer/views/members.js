@@ -104,7 +104,7 @@ function kickFlow (g, k) {
   const name = model.memberName(g, k)
   model.openModal('confirm', {
     title: `Kick ${name}?`,
-    body: `${name} is disconnected right away and ${model.groupName(g)} switches to a new key, so their copy of the invite stops working. They keep the messages they already have. To let them back in later, send them a new invite.`,
+    body: `${name} is disconnected right away and ${model.groupName(g)} switches to a new key, so any old invite code they have stops working. They keep the messages they already have. To let them back in later, send them a new invite link.`,
     confirm: 'Kick',
     danger: true,
     onConfirm: async () => {

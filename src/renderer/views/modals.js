@@ -9,8 +9,10 @@ import { participantsOf } from './stage.js'
 import { NetworkHealth } from './nethealth.js'
 import { AvatarCropper, useImagePicker } from './avatar.js'
 import { restartForUpdate, updateStatusText } from './updates.js'
+import { EventModal, TaskModal } from './planner.js'
+import { addFriendByCode } from './friends.js'
 
-function Modal ({ title, children, wide = false, onClose = () => model.closeModal() }) {
+export function Modal ({ title, children, wide = false, onClose = () => model.closeModal() }) {
   useEffect(() => {
     const k = (e) => { if (e.key === 'Escape') onClose() }
     window.addEventListener('keydown', k)
@@ -38,9 +40,86 @@ export function Modals () {
     screen: ScreenPickerModal,
     image: ImageModal,
     groupIcon: GroupIconModal,
-    textFile: TextFileModal
+    textFile: TextFileModal,
+    event: EventModal,
+    task: TaskModal,
+    openLink: OpenLinkModal
   }[m.name]
   return C ? html`<${C} ...${m.props} />` : null
+}
+
+// ---------------------------------------------------------------- links & invites
+
+const INVITE_TTLS = [[3600e3, '1 hour'], [864e5, '1 day'], [7 * 864e5, '7 days'], [30 * 864e5, '30 days']]
+const isJoinLink = (s) => /^opendiscord:\/\/join\/[A-Za-z0-9_-]{100,}\/?$/i.test(s.trim())
+const isFriendLink = (s) => /^opendiscord:\/\/friend\/[A-Za-z0-9_-]{80,}\/?$/i.test(s.trim())
+
+// The readable parts of a link (the name inside it), for the confirmation screen
+function peekLink (url) {
+  try {
+    const m = /^opendiscord:\/\/(join|friend)\/([A-Za-z0-9_-]+)/i.exec(url.trim())
+    const bin = atob(m[2].replace(/-/g, '+').replace(/_/g, '/'))
+    const bytes = Uint8Array.from(bin, ch => ch.charCodeAt(0))
+    const kind = m[1].toLowerCase()
+    const at = kind === 'join' ? 85 : 65
+    const name = new TextDecoder().decode(bytes.slice(at))
+    const exp = kind === 'join' ? (((bytes[81] << 24) >>> 0) + (bytes[82] << 16) + (bytes[83] << 8) + bytes[84]) * 1000 : 0
+    return { kind, name, exp }
+  } catch { return null }
+}
+
+export function fmtExpiry (exp) {
+  if (!exp) return 'never expires'
+  const ms = exp - Date.now()
+  if (ms <= 0) return 'expired'
+  if (ms < 3600e3) return `expires in ${Math.max(1, Math.round(ms / 60000))} min`
+  if (ms < 864e5) return `expires in ${Math.round(ms / 3600e3)} h`
+  return `expires in ${Math.round(ms / 864e5)} days`
+}
+
+// Join a group with a one-time link (or an old OD1 code). Returns true when done or pending.
+export async function joinWithLink (code) {
+  const r = await act(() => api.joinGroup(code))
+  if (!r) return false
+  if (r.pending) {
+    model.toast(`Waiting for someone from ${r.join.name || 'the group'} to let you in…`)
+    return true
+  }
+  model.addGroup(r)
+  model.selectGroup(r.id)
+  model.toast(r.existed ? "You're already in this group" : 'Joined! History syncs as soon as a friend in the group is online.')
+  return true
+}
+
+// Shown when an opendiscord:// link is clicked (in chat, or in another app)
+function OpenLinkModal ({ url }) {
+  const info = peekLink(url)
+  const [busy, setBusy] = useState(false)
+  if (!info) {
+    return html`<${Modal} title="Link not recognized"><div class="modal-body"><p>This OpenDiscord link is damaged. Ask for a new one.</p></div><footer><button class="btn" onClick=${() => model.closeModal()}>Close</button></footer><//>`
+  }
+  const go = async () => {
+    setBusy(true)
+    const ok = info.kind === 'join' ? await joinWithLink(url) : await addFriendByCode(url)
+    setBusy(false)
+    if (ok) model.closeModal()
+    if (ok && info.kind === 'friend') { model.ui.friendsTab = 'pending'; model.openHome() }
+  }
+  const expired = info.exp && info.exp < Date.now()
+  return html`
+    <${Modal} title=${info.kind === 'join' ? 'Group invite' : 'Friend link'}>
+      <div class="modal-body link-card">
+        <div class="intro-icon big"><${Icon} name=${info.kind === 'join' ? 'users' : 'userPlus'} size=${36} /></div>
+        ${info.kind === 'join'
+          ? html`<h2>Join ${info.name || 'this group'}?</h2><p class="hint">You'll be let in by whoever from the group is online. This link works once.${info.exp ? ' It ' + fmtExpiry(info.exp) + '.' : ''}</p>`
+          : html`<h2>Add ${info.name || 'this person'} as a friend?</h2><p class="hint">You'll be friends right away. This link works once.</p>`}
+        ${expired && html`<p class="hint warn-text">This link has expired. Ask for a new one.</p>`}
+      </div>
+      <footer>
+        <button class="btn" onClick=${() => model.closeModal()}>Cancel</button>
+        <button class="btn primary" disabled=${busy || expired} onClick=${go}>${info.kind === 'join' ? 'Join group' : 'Add friend'}</button>
+      </footer>
+    <//>`
 }
 
 // ---------------------------------------------------------------- groups
@@ -62,14 +141,11 @@ export function AddGroupModal ({ tab: initialTab = 'create' }) {
   }
   const join = async () => {
     setBusy(true)
-    const g = await act(() => api.joinGroup(code))
+    const ok = await joinWithLink(code)
     setBusy(false)
-    if (!g) return
-    model.addGroup(g)
-    model.selectGroup(g.id)
-    model.closeModal()
-    model.toast(g.existed ? "You're already in this group" : 'Joined! History syncs as soon as a friend in the group is online.')
+    if (ok) model.closeModal()
   }
+  const valid = isJoinLink(code) || /^OD1-[A-Za-z0-9_-]{20,}$/.test(code)
   return html`
     <${Modal} title="Add a group">
       <div class="tabs">
@@ -80,35 +156,96 @@ export function AddGroupModal ({ tab: initialTab = 'create' }) {
         ? html`
           <div class="modal-body">
             <label>Group name<input value=${name} maxLength="64" autoFocus onInput=${(e) => setName(e.target.value)} onKeyDown=${(e) => e.key === 'Enter' && create()} /></label>
-            <p class="hint">A fresh 256-bit secret is generated on this device. Only people you give the invite code to can find or join the group.</p>
+            <p class="hint">A fresh 256-bit secret is generated on this device. Only people you give a one-time invite link to can join.</p>
           </div>
           <footer><button class="btn primary" disabled=${busy || !name.trim()} onClick=${create}>Create group</button></footer>`
         : html`
           <div class="modal-body">
-            <label>Invite code<textarea class="mono" rows="3" value=${code} autoFocus placeholder="OD1-…" onInput=${(e) => setCode(e.target.value.trim())} /></label>
-            ${code.startsWith('ODF1-')
-              ? html`<p class="hint warn-text">That's a friend code, not a group invite. Add it under Friends (the top button in the left bar).</p>`
-              : html`<p class="hint">Ask a friend for the code (Group menu → Invite people).</p>`}
+            <label>Invite link<textarea class="mono" rows="3" value=${code} autoFocus placeholder="opendiscord://join/…" onInput=${(e) => setCode(e.target.value.trim())} /></label>
+            ${isFriendLink(code) || code.startsWith('ODF1-')
+              ? html`<p class="hint warn-text">That's a friend link, not a group invite. Add it under Friends (the top button in the left bar).</p>`
+              : html`<p class="hint">Ask someone in the group for an invite link (group menu → Invite people). Each link works once.</p>`}
+            ${model.joins.length > 0 && html`<${PendingJoins} />`}
           </div>
-          <footer><button class="btn primary" disabled=${busy || !code.startsWith('OD1-')} onClick=${join}>Join group</button></footer>`}
+          <footer><button class="btn primary" disabled=${busy || !valid} onClick=${join}>Join group</button></footer>`}
     <//>`
 }
 
-function InviteModal ({ gid, fresh }) {
-  const [code, setCode] = useState('')
-  const [copied, setCopied] = useState(false)
-  useEffect(() => { api.getInvite(gid).then(setCode) }, [gid])
-  const copy = async () => { await api.copy(code); setCopied(true); setTimeout(() => setCopied(false), 1500) }
+function PendingJoins () {
   return html`
-    <${Modal} title=${fresh ? 'Group created — invite your friends' : 'Invite friends'}>
+    <div class="pending-joins">
+      <small>Waiting to be let in</small>
+      ${model.joins.map(j => html`
+        <div class="pending-join" key=${j.id}>
+          <div class="spinner small" />
+          <span><b>${j.name || 'A group'}</b> · someone from the group needs to be online</span>
+          <button class="btn sm" onClick=${() => act(() => api.cancelJoin(j.id))}>Cancel</button>
+        </div>`)}
+    </div>`
+}
+
+function InviteModal ({ gid, fresh }) {
+  const g = model.groups.get(gid)
+  const [ttl, setTtl] = useState(7 * 864e5)
+  const [link, setLink] = useState('')
+  const [copied, setCopied] = useState(false)
+  const [busy, setBusy] = useState(false)
+  if (!g) return null
+  const allowed = model.canInvite(g)
+  const mod = model.isMod(g, model.me.key)
+  const adminsOnly = model.groupSettings(g).invites === 'admins'
+  const active = model.activeInvites(g)
+  const create = async () => {
+    setBusy(true)
+    const r = await act(() => api.createInvite(gid, ttl))
+    setBusy(false)
+    if (!r) return
+    model.applyOps(gid, [r.op])
+    setLink(r.link)
+    setCopied(false)
+  }
+  const copy = async () => { await api.copy(link); setCopied(true); setTimeout(() => setCopied(false), 1500) }
+  const revoke = async (i) => {
+    const op = await act(() => api.revokeInvite(gid, i.id))
+    if (op) model.applyOps(gid, [op])
+  }
+  const setAdminsOnly = (v) => act(() => append(gid, 'group.settings', { invites: v ? 'admins' : 'all' }))
+  return html`
+    <${Modal} title=${fresh ? 'Group created — invite your friends' : 'Invite people'}>
       <div class="modal-body">
-        <div class="invite-box">
-          <code class="mono">${code}</code>
-          <button class="btn primary" onClick=${copy}><${Icon} name=${copied ? 'check' : 'copy'} size=${16} /> ${copied ? 'Copied' : 'Copy'}</button>
-        </div>
-        <div class="callout warn">
+        ${!allowed
+          ? html`<div class="callout"><${Icon} name="shield" size=${16} /><div>Only the owner and admins can invite people to <b>${model.groupName(g)}</b>. Ask one of them for a link.</div></div>`
+          : link
+            ? html`
+              <div class="invite-box">
+                <code class="mono">${link}</code>
+                <button class="btn primary" onClick=${copy}><${Icon} name=${copied ? 'check' : 'copy'} size=${16} /> ${copied ? 'Copied' : 'Copy'}</button>
+              </div>
+              <p class="hint">Works <b>once</b> and ${fmtExpiry(Date.now() + ttl)}. Clicking it opens OpenDiscord. If an app doesn't make it clickable, they can paste it under “Join with invite”.</p>
+              <button class="btn sm" onClick=${() => setLink('')}>Make another link</button>`
+            : html`
+              <p>Each invite link lets <b>one</b> person in. Once it's used, it stops working, so a forwarded or leaked link is harmless.</p>
+              <div class="row">
+                <label class="grow">Link expires after
+                  <select value=${ttl} onChange=${(e) => setTtl(Number(e.target.value))}>${INVITE_TTLS.map(([v, l]) => html`<option value=${v}>${l}</option>`)}</select>
+                </label>
+                <button class="btn primary create-invite" disabled=${busy} onClick=${create}><${Icon} name="link" size=${16} /> Create invite link</button>
+              </div>`}
+        ${active.length > 0 && html`
+          <div class="invite-list">
+            <small>Unused links</small>
+            ${active.map(i => html`
+              <div class="invite-row" key=${i.id}>
+                <${Icon} name="ticket" size=${16} class="dim" />
+                <span>by ${i.by === model.me.key ? 'you' : model.memberName(g, i.by)} · ${fmtExpiry(i.exp)}</span>
+                ${(i.by === model.me.key || mod) && html`<button class="btn sm" onClick=${() => revoke(i)}>Cancel link</button>`}
+              </div>`)}
+          </div>`}
+        ${mod && html`
+          <${Toggle} label="Only the owner and admins can invite" hint="Members can't make invite links, and links made by members stop working" checked=${adminsOnly} onChange=${setAdminsOnly} />`}
+        <div class="callout">
           <${Icon} name="lock" size=${16} />
-          <div>This code <b>is</b> the group key. Anyone who has it can join and read the full history, so send it privately (in person, or over Signal/WhatsApp) — never post it publicly.</div>
+          <div>Someone from the group has to be online when the link is opened. They check that it's unused, then hand over the group key, encrypted for the new person only.</div>
         </div>
       </div>
       <footer><button class="btn" onClick=${() => model.closeModal()}>Done</button></footer>
@@ -561,11 +698,53 @@ function NetworkSettings () {
     <${Toggle} label="Desktop notifications" checked=${st.notifications} onChange=${(v) => saveSettings({ notifications: v })} />`
 }
 
+const CLEAN_DAYS = [[0, 'Never'], [7, 'After 7 days'], [30, 'After 30 days'], [90, 'After 90 days']]
+
+function StorageUsage ({ info, onCleaned }) {
+  const [busy, setBusy] = useState(false)
+  const m = info.messages
+  const f = info.files
+  const clean = async (days) => {
+    setBusy(true)
+    const r = await act(() => api.cleanStorage(days))
+    setBusy(false)
+    if (!r) return
+    model.blobs.clear() // forget which files we have; they're checked again when shown
+    model.toast(r.n ? `Freed ${fmtBytes(r.bytes)} (${r.n} file${r.n === 1 ? '' : 's'})` : 'Nothing to clean up')
+    onCleaned()
+  }
+  const total = m.disk + f.mine.bytes + f.friends.bytes + f.unused.bytes
+  const bar = (bytes) => ({ width: total ? Math.max(bytes ? 1 : 0, bytes / total * 100) + '%' : '0' })
+  return html`
+    <div class="usage">
+      <div class="usage-bar">
+        <i class="u-msg" style=${bar(m.disk)} /><i class="u-mine" style=${bar(f.mine.bytes)} /><i class="u-friends" style=${bar(f.friends.bytes)} /><i class="u-unused" style=${bar(f.unused.bytes)} />
+      </div>
+      <div class="usage-rows">
+        <div><span class="u-dot u-msg" /><b>Messages & history</b><span>${fmtBytes(m.disk)}</span>
+          <small>${m.ops.toLocaleString()} entries${m.disk && m.raw / m.disk > 1.1 ? `, compressed ${(m.raw / m.disk).toFixed(1)}× (${fmtBytes(m.raw)} uncompressed)` : ''}${m.stubs ? ` · ${m.stubs.toLocaleString()} deleted or outdated entries cleared` : ''}</small></div>
+        <div><span class="u-dot u-mine" /><b>Files you sent</b><span>${fmtBytes(f.mine.bytes)}</span><small>${f.mine.n} files · always kept, friends download them from you</small></div>
+        <div><span class="u-dot u-friends" /><b>Files from friends</b><span>${fmtBytes(f.friends.bytes)}</span><small>${f.friends.n} files · can be removed and downloaded again later</small></div>
+        ${f.unused.n > 0 && html`<div><span class="u-dot u-unused" /><b>Files from deleted messages</b><span>${fmtBytes(f.unused.bytes)}</span><small>${f.unused.n} files · removed automatically</small></div>`}
+      </div>
+      <div class="row">
+        <button class="btn" disabled=${busy || !(f.friends.n + f.unused.n)} onClick=${() => clean(0)}>Remove files from friends</button>
+        <label class="inline">Automatically remove friends' files
+          <select value=${model.settings.cleanFriendsFilesDays || 0} onChange=${(e) => saveSettings({ cleanFriendsFilesDays: Number(e.target.value) })}>
+            ${CLEAN_DAYS.map(([v, l]) => html`<option value=${v}>${l}</option>`)}
+          </select>
+        </label>
+      </div>
+      <p class="hint">Messages are stored compressed. Deleted messages, older versions of edited messages and old profile pictures are erased for good two days later (time for friends on older versions to update).</p>
+    </div>`
+}
+
 function StorageSettings () {
   const [info, setInfo] = useState(null)
   const [pending, setPending] = useState(null) // { dir, existing } waiting for confirmation
   const [busy, setBusy] = useState(false)
-  useEffect(() => { api.storageInfo().then(setInfo, (e) => model.toast('Could not read the data folder: ' + e.message, 'error')) }, [])
+  const load = () => api.storageInfo().then(setInfo, (e) => model.toast('Could not read the data folder: ' + e.message, 'error'))
+  useEffect(() => { load() }, [])
   const choose = async (picked) => {
     const t = await act(() => api.checkStorage(picked))
     if (t) setPending(t)
@@ -582,6 +761,8 @@ function StorageSettings () {
   }
   const isDefault = info && info.dir.toLowerCase() === info.defaultDir.toLowerCase()
   return html`
+    <h4>Space used</h4>
+    ${info ? html`<${StorageUsage} info=${info} onCleaned=${load} />` : html`<p class="hint">…</p>`}
     <h4>Data folder</h4>
     <p class="hint">Your identity (your key pair), groups, messages and the files you've received live here. Pick a bigger drive if you share lots of large files.</p>
     <div class="invite-box">

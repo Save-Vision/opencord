@@ -21,8 +21,94 @@ export function Avatar ({ name, color, src = null, size = 40, speaking = false, 
 }
 
 export function jumpToMessage (id) {
+  // A reply that lives only in a thread: open the thread instead
+  const g = model.currentGroup()
+  const m = g?.msgById.get(id)
+  if (m?.th && !m.also) { model.openThread(g.id, m.th); return }
   model.ui.jumpTo = id
   model.emit()
+}
+
+function fmtAgo (t) {
+  const s = (Date.now() - t) / 1000
+  if (s < 60) return 'just now'
+  if (s < 3600) return Math.floor(s / 60) + ' min ago'
+  if (s < 86400) return Math.floor(s / 3600) + ' h ago'
+  return fmtStamp(t)
+}
+
+// "3 replies · Last reply 5 min ago" under a message that has a thread
+// One line of a message without markdown symbols, for "replied to …" previews
+const snippet = (text) => text
+  .replace(/```[\s\S]*?(```|$)/g, ' [code] ')
+  .replace(/\*\*|__|~~|\|\||`/g, '')
+  .replace(/(^|\s)[*_](?=\S)([^*_\n]+?)[*_](?=\s|$|[.,!?])/g, '$1$2')
+  .replace(/^\s*(#{1,3}|>)\s+/gm, '')
+  .replace(/\s+/g, ' ')
+  .trim()
+  .slice(0, 120)
+
+function ThreadSummary ({ g, m }) {
+  const info = model.threadInfo(g, m.id)
+  if (!info) return null
+  const unread = model.threadUnread(g, m.id)
+  const open = model.ui.thread?.id === m.id
+  return html`
+    <button class="thread-summary ${open ? 'open' : ''} ${unread ? 'unread' : ''}" onClick=${() => model.openThread(g.id, m.id)}>
+      <span class="ts-people">${info.people.map(k => html`<${Avatar} key=${k} name=${model.memberName(g, k)} color=${model.memberColor(g, k)} src=${model.memberAvatar(g, k)} size=${20} />`)}</span>
+      <b>${info.count} ${info.count === 1 ? 'reply' : 'replies'}</b>
+      ${unread > 0 && html`<span class="ts-new">${unread} new</span>`}
+      <small>Last reply ${fmtAgo(info.last)}</small>
+      <span class="ts-view">View thread <${Icon} name="chevronRight" size=${14} /></span>
+    </button>`
+}
+
+// The side panel with one thread: the message it started from, the replies, a composer
+export function ThreadPanel ({ g }) {
+  const id = model.ui.thread.id
+  const root = g.msgById.get(id)
+  const replies = model.threadOf(g, id)
+  const ch = g.channels.get(root?.ch || replies[0]?.ch) || model.currentChannel(g)
+  const ref = useRef()
+  const stick = useRef(true)
+  useLayoutEffect(() => { if (stick.current && ref.current) ref.current.scrollTop = ref.current.scrollHeight })
+  useEffect(() => { if (model.ui.focused) model.markThreadRead(g.id, id) })
+  useEffect(() => { stick.current = true }, [id])
+  const names = useMemo(() => new Set([...g.members.values()].map(m => (m.name || '').toLowerCase()).filter(Boolean)), [g.members.size, model.me.name])
+  const ctx = { names, myName: (model.me.name || '').toLowerCase(), openLink: (u) => openLink(u) }
+  const onScroll = () => {
+    const el = ref.current
+    stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 60
+  }
+  const onMediaLoad = () => { if (stick.current && ref.current) ref.current.scrollTop = ref.current.scrollHeight }
+  let prev = null
+  return html`
+    <aside class="thread-panel">
+      <header>
+        <${Icon} name="thread" size=${20} class="dim" />
+        <div class="tp-title"><b>Thread</b><small>${g.dm ? model.groupName(g) : '#' + (ch?.name || 'channel')}</small></div>
+        <div class="spacer" />
+        <button class="icon-btn" title="Close thread" onClick=${() => model.closeThread()}><${Icon} name="x" /></button>
+      </header>
+      <div class="thread-body" ref=${ref} onScroll=${onScroll}>
+        ${root && !root.deleted
+          ? html`<${Message} g=${g} m=${root} grouped=${false} ctx=${ctx} onMediaLoad=${onMediaLoad} inThread=${true} />`
+          : html`<div class="thread-missing"><${Icon} name="trash" size=${16} /> The message this thread started from was deleted.</div>`}
+        <div class="thread-divider"><span>${replies.length ? `${replies.length} ${replies.length === 1 ? 'reply' : 'replies'}` : 'No replies yet'}</span></div>
+        ${replies.map((m) => {
+          const grouped = prev && prev.a === m.a && m.t - prev.t < 7 * 60 * 1000
+          prev = m
+          return html`<${Message} key=${m.id} g=${g} m=${m} grouped=${grouped} ctx=${ctx} onMediaLoad=${onMediaLoad} inThread=${true} />`
+        })}
+      </div>
+      ${ch && html`<${Composer} key=${'t' + g.id + id} g=${g} ch=${ch} thread=${id} />`}
+    </aside>`
+}
+
+// opendiscord:// links open in the app; web links in the browser
+export function openLink (url) {
+  if (/^opendiscord:\/\//i.test(url)) model.openModal('openLink', { url })
+  else api.openExternal(url)
 }
 
 export function startDmCall (g) {
@@ -56,8 +142,10 @@ export function ChatView ({ g, ch }) {
         <span class="header-note"><${Icon} name="lock" size=${13} /> ${dm ? 'Private: only the two of you have the key' : "Stored only on your friends' devices"}</span>
         <div class="spacer" />
         ${dm && html`<button class="icon-btn" title=${voice.inChannel(g.id, DM_CALL) ? 'Open call' : 'Start a call'} onClick=${() => startDmCall(g)}><${Icon} name="phone" /></button>`}
+        ${dm && html`<button class="icon-btn" title="Shared calendar" onClick=${() => model.openPlanner(g.id, 'calendar')}><${Icon} name="calendar" /></button>`}
+        ${dm && html`<button class="icon-btn" title="Shared tasks" onClick=${() => model.openPlanner(g.id, 'tasks')}><${Icon} name="tasks" /></button>`}
         <${PinsButton} g=${g} ch=${ch} />
-        ${!dm && html`<button class="icon-btn" title="Invite friends" onClick=${() => model.openModal('invite', { gid: g.id })}><${Icon} name="userPlus" /></button>`}
+        ${!dm && model.canInvite(g) && html`<button class="icon-btn" title="Invite friends" onClick=${() => model.openModal('invite', { gid: g.id })}><${Icon} name="userPlus" /></button>`}
       </header>
       ${g.kickedMe && html`
         <div class="banner bad removed-banner">
@@ -99,7 +187,7 @@ function PinsButton ({ g, ch }) {
     setTimeout(() => document.addEventListener('mousedown', off), 0)
     return () => document.removeEventListener('mousedown', off)
   }, [open])
-  const ctx = { names: new Set(), myName: '', openLink: (u) => api.openExternal(u) }
+  const ctx = { names: new Set(), myName: '', openLink: (u) => openLink(u) }
   return html`
     <div class="pins-wrap" ref=${ref}>
       <button class="icon-btn ${open ? 'on' : ''}" title="Pinned messages" onClick=${() => setOpen(!open)}>
@@ -199,7 +287,7 @@ function MessageList ({ g, ch }) {
   }, [])
 
   const names = useMemo(() => new Set([...g.members.values()].map(m => (m.name || '').toLowerCase()).filter(Boolean)), [g.members.size, model.me.name])
-  const ctx = { names, myName: (model.me.name || '').toLowerCase(), openLink: (u) => api.openExternal(u) }
+  const ctx = { names, myName: (model.me.name || '').toLowerCase(), openLink: (u) => openLink(u) }
 
   const rows = []
   let prev = shown.length < list.length ? null : undefined
@@ -210,7 +298,7 @@ function MessageList ({ g, ch }) {
       shownNew = true
       rows.push(html`<div class="new-divider" key="new"><span>NEW</span></div>`)
     }
-    const grouped = prev && prev.a === m.a && m.t - prev.t < 7 * 60 * 1000 && fmtDay(prev.t) === fmtDay(m.t) && !m.re
+    const grouped = prev && prev.a === m.a && m.t - prev.t < 7 * 60 * 1000 && fmtDay(prev.t) === fmtDay(m.t) && !m.re && !m.also && !m.deleted && !prev.deleted && !model.threadInfo(g, prev.id)
     rows.push(html`<${Message} key=${m.id} g=${g} m=${m} grouped=${grouped} ctx=${ctx} onMediaLoad=${onMediaLoad} />`)
     prev = m
   }
@@ -237,13 +325,26 @@ function MessageList ({ g, ch }) {
     ${!atBottom && html`<button class="jump" onClick=${() => { stick.current = true; ref.current.scrollTop = ref.current.scrollHeight }}>Jump to present ↓</button>`}`
 }
 
-function Message ({ g, m, grouped, ctx, onMediaLoad }) {
+function Message ({ g, m, grouped, ctx, onMediaLoad, inThread = false }) {
   const mine = m.a === model.me.key
   const editing = model.ui.editing === m.id
   const [picker, setPicker] = useState(false)
   const name = model.memberName(g, m.a)
   const color = model.memberColor(g, m.a)
+  // deleted, but replies in its thread keep it in the channel
+  if (m.deleted) {
+    if (inThread || !model.threadInfo(g, m.id)) return null
+    return html`
+      <div id=${'msg-' + m.id} class="msg deleted">
+        <div class="msg-avatar"><div class="deleted-mark"><${Icon} name="trash" size=${16} /></div></div>
+        <div class="msg-body">
+          <div class="text"><i class="muted">This message was deleted.</i></div>
+          <${ThreadSummary} g=${g} m=${m} />
+        </div>
+      </div>`
+  }
   if (!m._md || m._mdText !== m.text) { m._md = renderMarkdown(m.text, ctx); m._mdText = m.text }
+  const threadRoot = m.also ? g.msgById.get(m.th) : null
   const mention = !mine && model.mentionsMe(m.text)
   const parent = m.re ? g.msgById.get(m.re) : null
   const pinned = model.isPinned(g, m.id)
@@ -254,7 +355,8 @@ function Message ({ g, m, grouped, ctx, onMediaLoad }) {
     act(() => append(g.id, 'react', { id: m.id, e, on: !mineOn }))
   }
   const del = (ev) => {
-    const doIt = () => act(() => append(g.id, 'msg.delete', { id: m.id }))
+    // ch/at keep the spot of a deleted message that has a thread (see model msg.delete)
+    const doIt = () => act(() => append(g.id, 'msg.delete', { id: m.id, ch: m.ch, at: m.t }))
     if (ev.shiftKey) doIt()
     else model.openModal('confirm', { title: 'Delete message', body: 'Delete this message for everyone? Friends who are offline will remove it when they next sync.', confirm: 'Delete', danger: true, onConfirm: doIt })
   }
@@ -262,11 +364,17 @@ function Message ({ g, m, grouped, ctx, onMediaLoad }) {
 
   return html`
     <div id=${'msg-' + m.id} class="msg ${grouped ? 'grouped' : ''} ${mention ? 'mention' : ''} ${editing ? 'editing' : ''} ${pinned ? 'pinned' : ''}">
+      ${m.also && !inThread && html`
+        <div class="reply-ref thread-ref" onClick=${() => model.openThread(g.id, m.th)}>
+          <${Icon} name="thread" size=${13} />
+          <span>replied to a thread:</span>
+          ${threadRoot && !threadRoot.deleted ? html`<span class="reply-snippet">${snippet(threadRoot.text) || '📎 attachment'}</span>` : html`<i>deleted message</i>`}
+        </div>`}
       ${m.re && html`
         <div class="reply-ref" onClick=${() => jumpToMessage(m.re)}>
           <span class="reply-line" />
           ${parent && !parent.deleted
-            ? html`<b style=${{ color: model.memberColor(g, parent.a) }}>${model.memberName(g, parent.a)}</b><span class="reply-snippet">${parent.text.slice(0, 120) || '📎 attachment'}</span>`
+            ? html`<b style=${{ color: model.memberColor(g, parent.a) }}>${model.memberName(g, parent.a)}</b><span class="reply-snippet">${snippet(parent.text) || '📎 attachment'}</span>`
             : html`<i>Original message was deleted</i>`}
         </div>`}
       ${grouped
@@ -287,11 +395,13 @@ function Message ({ g, m, grouped, ctx, onMediaLoad }) {
               return html`<button key=${e} class="reaction ${who.includes(model.me.key) ? 'mine' : ''}" title=${who.map(k => model.memberName(g, k)).join(', ')} onClick=${() => react(e)}>${e} <b>${who.length}</b></button>`
             })}
           </div>`}
+        ${!inThread && !m.th && html`<${ThreadSummary} g=${g} m=${m} />`}
       </div>
       ${!editing && !g.kickedMe && html`
         <div class="msg-tools">
           <button title="Add reaction" data-emoji-toggle onClick=${() => setPicker(!picker)}><${Icon} name="smile" size=${18} /></button>
-          <button title="Reply" onClick=${() => { model.ui.replyTo = m.id; model.emit(); document.querySelector('.composer textarea')?.focus() }}><${Icon} name="reply" size=${18} /></button>
+          ${!inThread && html`<button title="Reply" onClick=${() => { model.ui.replyTo = m.id; model.emit(); document.querySelector('.chat .composer textarea')?.focus() }}><${Icon} name="reply" size=${18} /></button>`}
+          ${!inThread && !m.th && html`<button title="Reply in thread" class="thread-btn" onClick=${() => model.openThread(g.id, m.id)}><${Icon} name="thread" size=${18} /></button>`}
           <button title=${pinned ? 'Unpin' : 'Pin message'} class=${pinned ? 'on' : ''} onClick=${pin}><${Icon} name="pin" size=${18} /></button>
           ${mine && html`<button title="Edit" onClick=${() => { model.ui.editing = m.id; model.emit() }}><${Icon} name="edit" size=${18} /></button>`}
           ${mine && html`<button title="Delete (shift-click to skip confirmation)" class="danger" onClick=${del}><${Icon} name="trash" size=${18} /></button>`}
@@ -451,16 +561,18 @@ async function attachPreviews (gid, id, text) {
 
 const SHORTCODE = /(^|[\s(])(:[\w+-]{2,32})$/
 
-function Composer ({ g, ch, handle }) {
-  const key = g.id + ':' + ch.id
+function Composer ({ g, ch, handle, thread = null }) {
+  const key = g.id + ':' + ch.id + (thread ? ':t:' + thread : '')
+  const typingCh = thread ? ch.id + '/' + thread : ch.id
   const [text, setText] = useState(drafts.get(key) || '')
+  const [alsoSend, setAlsoSend] = useState(false)
   const [files, setFiles] = useState([])
   const [busy, setBusy] = useState(false)
   const [emojiOpen, setEmojiOpen] = useState(false)
   const [sugg, setSugg] = useState({ items: [], index: 0 })
   const ta = useRef()
   const lastTyping = useRef(0)
-  const reply = model.ui.replyTo ? g.msgById.get(model.ui.replyTo) : null
+  const reply = !thread && model.ui.replyTo ? g.msgById.get(model.ui.replyTo) : null
 
   const addPaths = async (paths) => {
     setBusy(true)
@@ -480,7 +592,7 @@ function Composer ({ g, ch, handle }) {
 
   if (g.kickedMe) return html`<div class="composer-wrap"><div class="composer disabled">You can't send messages here because you were removed from this group.</div><div class="typing" /></div>`
 
-  const placeholder = g.dm ? 'Message @' + model.groupName(g) : 'Message #' + ch.name
+  const placeholder = thread ? 'Reply in thread…' : g.dm ? 'Message @' + model.groupName(g) : 'Message #' + ch.name
 
   const send = async () => {
     const t = text.trim()
@@ -488,13 +600,17 @@ function Composer ({ g, ch, handle }) {
     const data = { id: rid(), ch: ch.id, text: t }
     if (files.length) data.att = files.map(({ h, s, n, m, w, hh }) => ({ h, s, n, m, w, hh }))
     if (reply) data.re = reply.id
+    if (thread) {
+      data.th = thread
+      if (alsoSend) data.also = true
+    }
     const ok = await act(() => append(g.id, 'msg', data), 'Could not send')
     if (!ok) return
     setText('')
     setFiles([])
     setSugg({ items: [], index: 0 })
     drafts.delete(key)
-    model.ui.replyTo = null
+    if (!thread) model.ui.replyTo = null
     model.emit()
     requestAnimationFrame(() => ta.current && autosize(ta.current))
     if (t) attachPreviews(g.id, data.id, t)
@@ -560,9 +676,9 @@ function Composer ({ g, ch, handle }) {
       if (e.key === 'Escape') { e.preventDefault(); setSugg({ items: [], index: 0 }); return }
     }
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); return }
-    if (e.key === 'Escape' && model.ui.replyTo) { model.ui.replyTo = null; model.emit() }
+    if (e.key === 'Escape' && !thread && model.ui.replyTo) { model.ui.replyTo = null; model.emit() }
     if (e.key === 'ArrowUp' && !text) {
-      const list = g.messages.get(ch.id) || []
+      const list = thread ? model.threadOf(g, thread) : g.messages.get(ch.id) || []
       for (let i = list.length - 1; i >= 0; i--) {
         if (list[i].a === model.me.key) { e.preventDefault(); model.ui.editing = list[i].id; model.emit(); break }
       }
@@ -575,7 +691,7 @@ function Composer ({ g, ch, handle }) {
     const now = Date.now()
     if (e.target.value && now - lastTyping.current > 3000) {
       lastTyping.current = now
-      api.sendEph(g.id, null, { type: 'typing', ch: ch.id })
+      api.sendEph(g.id, null, { type: 'typing', ch: typingCh })
     }
   }
   const onPaste = (e) => {
@@ -583,10 +699,10 @@ function Composer ({ g, ch, handle }) {
     if (list.length) { e.preventDefault(); addFiles(list) }
   }
 
-  const typers = [...(g.typing.get(ch.id)?.keys() || [])].filter(k => k !== model.me.key).map(k => model.memberName(g, k))
+  const typers = [...(g.typing.get(typingCh)?.keys() || [])].filter(k => k !== model.me.key).map(k => model.memberName(g, k))
 
   return html`
-    <div class="composer-wrap">
+    <div class="composer-wrap ${thread ? 'in-thread' : ''}">
       <${EmojiSuggest} items=${sugg.items} index=${sugg.index} onPick=${applySuggest} />
       ${emojiOpen && html`<${EmojiPanel} class="for-composer" onPick=${insert} onClose=${() => setEmojiOpen(false)} />`}
       ${reply && html`
@@ -615,6 +731,11 @@ function Composer ({ g, ch, handle }) {
         <button class="icon-btn emoji-btn ${emojiOpen ? 'on' : ''}" title="Emoji (or type :name)" data-emoji-toggle onClick=${() => setEmojiOpen(!emojiOpen)}><${Icon} name="smile" /></button>
         <button class="icon-btn send ${text.trim() || files.length ? 'ready' : ''}" title="Send (Enter)" onClick=${send}><${Icon} name="send" /></button>
       </div>
+      ${thread && html`
+        <label class="also-send">
+          <input type="checkbox" checked=${alsoSend} onChange=${(e) => setAlsoSend(e.target.checked)} />
+          Also send to ${g.dm ? 'the chat' : '#' + ch.name}
+        </label>`}
       <div class="typing">${typers.length > 0 && html`<span class="dots"><i /><i /><i /></span> <b>${typers.join(', ')}</b> ${typers.length > 1 ? 'are' : 'is'} typing…`}</div>
     </div>`
 }

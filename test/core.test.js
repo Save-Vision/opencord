@@ -295,3 +295,184 @@ test('friends: request by friend code, accept, private chat only the two can joi
   assert.strictEqual(texts(carol, aliceDm.id).length, 0)
   assert.throws(() => alice.store.inviteFor(aliceDm.id), /Private chats/)
 })
+
+const onceEvent = (emitter, name, filter = () => true, ms = 25000) => new Promise((resolve, reject) => {
+  const t = setTimeout(() => { emitter.off(name, fn); reject(new Error('Timed out waiting for ' + name)) }, ms)
+  function fn (...args) { if (!filter(...args)) return; clearTimeout(t); emitter.off(name, fn); resolve(args) }
+  emitter.on(name, fn)
+})
+
+// Both sides now have every op the other one wrote
+const synced = (a, b, gid) => {
+  const va = a.store.groups.get(gid)?.byAuthor
+  const vb = b.store.groups.get(gid)?.byAuthor
+  if (!va || !vb) return false
+  for (const [k, list] of va) if ((vb.get(k)?.length || 0) < list.length) return false
+  for (const [k, list] of vb) if ((va.get(k)?.length || 0) < list.length) return false
+  return true
+}
+
+test('one-time invite links: a member lets the guest in, then the link refuses anyone else', async (t) => {
+  const alice = await makeNode('i-alice')
+  const bob = await makeNode('i-bob')
+  const carol = await makeNode('i-carol')
+  t.after(async () => { await Promise.all([alice, bob, carol].map(n => n.net.stop())) })
+
+  const group = alice.store.createGroup('Link Squad')
+  alice.net.joinGroup(group)
+  const { link } = alice.store.createInvite(group.id, 3600e3)
+  alice.net.refreshInvites()
+  assert.match(link, /^opendiscord:\/\/join\/[A-Za-z0-9_-]+$/)
+  assert.ok(!link.includes(group.secret.toString('base64url')), 'the link does not contain the group key')
+
+  // Bob opens the link: alice checks it and hands over the key
+  const { join } = bob.store.startJoin(link)
+  assert.strictEqual(join.name, 'Link Squad')
+  const joined = onceEvent(bob.net, 'joined', (id) => id === join.id)
+  bob.net.startJoin(join)
+  const [, res] = await joined
+  assert.strictEqual(res.group.id, group.id)
+  assert.ok(res.group.secret.equals(group.secret))
+  await waitFor(() => synced(alice, bob, group.id), 20000, 'bob to sync')
+  assert.strictEqual(bob.store.groupName(bob.store.groups.get(group.id)), 'Link Squad')
+  assert.deepStrictEqual(Object.keys(bob.store.joins), [], 'pending join cleared')
+  const inv = [...alice.store.invitesOf(alice.store.groups.get(group.id)).values()][0]
+  assert.strictEqual(inv.used.key, bob.store.myKey)
+  assert.strictEqual(alice.store.activeInvites(alice.store.groups.get(group.id)).length, 0)
+
+  // Carol got the same (now used) link forwarded: refused, and she learns nothing
+  const { join: cj } = carol.store.startJoin(link)
+  const failed = onceEvent(carol.net, 'join-failed', (id) => id === cj.id)
+  carol.net.startJoin(cj)
+  const [, reason] = await failed
+  assert.strictEqual(reason, 'used')
+  assert.ok(!carol.store.groups.has(group.id))
+  assert.deepStrictEqual(Object.keys(carol.store.joins), [])
+
+  // A link bob made stops working once the owner limits invites to admins
+  const { link: bobLink, op: bobInv } = bob.store.createInvite(group.id)
+  bob.net.broadcastOps(group.id, [bobInv])
+  bob.net.refreshInvites()
+  await waitFor(() => alice.store.activeInvites(alice.store.groups.get(group.id)).length === 1, 10000, 'alice to see the invite bob made')
+  const s = alice.store.append(group.id, 'group.settings', { invites: 'admins' })
+  alice.net.broadcastOps(group.id, [s])
+  await waitFor(() => bob.store.groupSettings(bob.store.groups.get(group.id)).invites === 'admins', 10000, 'setting to sync')
+  assert.throws(() => bob.store.createInvite(group.id), /owner and admins/)
+  assert.strictEqual(bob.store.activeInvites(bob.store.groups.get(group.id)).length, 0)
+  const { join: cj2 } = carol.store.startJoin(bobLink)
+  const failed2 = onceEvent(carol.net, 'join-failed', (id) => id === cj2.id)
+  carol.net.startJoin(cj2)
+  assert.strictEqual((await failed2)[1], 'revoked')
+
+  // The owner can still invite, and a revoked link is refused
+  const { link: l3, op: o3 } = alice.store.createInvite(group.id)
+  const rv = alice.store.append(group.id, 'invite.revoke', { id: o3.d.id })
+  alice.net.broadcastOps(group.id, [o3, rv])
+  alice.net.refreshInvites()
+  assert.throws(() => carol.store.startJoin('opendiscord://join/AAAA'), /invite link/)
+  const { join: cj3 } = carol.store.startJoin(l3)
+  const failed3 = onceEvent(carol.net, 'join-failed', (id) => id === cj3.id)
+  carol.net.startJoin(cj3)
+  assert.strictEqual((await failed3)[1], 'revoked')
+})
+
+test('friend links: opening one makes you friends right away, and it works only once', async (t) => {
+  const alice = await makeNode('fl-alice')
+  const bob = await makeNode('fl-bob')
+  const carol = await makeNode('fl-carol')
+  t.after(async () => { await Promise.all([alice, bob, carol].map(n => n.net.stop())) })
+
+  const link = alice.store.createFriendLink(3600e3)
+  assert.match(link, /^opendiscord:\/\/friend\//)
+  assert.strictEqual(alice.store.friendsInfo().links.length, 1)
+
+  const linked = onceEvent(alice.net, 'friend-linked', (key) => key === bob.store.myKey)
+  const { group: bobDm, key } = bob.store.addFriend(link)
+  assert.strictEqual(key, alice.store.myKey)
+  bob.net.joinGroup(bobDm)
+  bob.net.sendFriendRequest(key)
+  const [, aliceDm] = await linked
+  assert.strictEqual(aliceDm.id, bobDm.id)
+  assert.strictEqual(alice.store.friendsInfo().incoming.length, 0, 'no request to click through')
+  await waitFor(() => alice.store.isFriend(bob.store.myKey), 15000, 'alice to get bob in the private chat')
+  await waitFor(() => bob.store.isFriend(alice.store.myKey), 15000, 'bob to see they are friends')
+  const m = bob.store.append(bobDm.id, 'msg', { id: 'hi', ch: 'dm', text: 'got your link' })
+  bob.net.broadcastOps(bobDm.id, [m])
+  await waitFor(() => texts(alice, aliceDm.id).includes('got your link'), 5000, 'message over the new chat')
+  assert.strictEqual(alice.store.friendsInfo().links.length, 0, 'used links are no longer listed')
+  assert.ok(!JSON.stringify(bob.store.friendsInfo()).includes(c.parseLink(link).token.toString('hex')), 'token not exposed to the UI')
+
+  // Carol has the same link: alice says no, and carol's side drops the pending friend
+  const rejected = onceEvent(carol.net, 'friend-rejected', (k) => k === alice.store.myKey)
+  const { group: carolDm } = carol.store.addFriend(link)
+  carol.net.joinGroup(carolDm)
+  carol.net.sendFriendRequest(alice.store.myKey)
+  const [, why] = await rejected
+  assert.strictEqual(why, 'used')
+  assert.ok(!alice.store.isFriend(carol.store.myKey))
+  assert.strictEqual(alice.store.friendsInfo().incoming.length, 0)
+})
+
+test('storage: deleted and outdated entries are erased from disk and sync as stubs', async (t) => {
+  const alice = await makeNode('st-alice')
+  alice.store.stubDelay = 0
+  const bob = await makeNode('st-bob')
+  bob.store.stubDelay = 0
+  t.after(async () => { await Promise.all([alice.net.stop(), bob.net.stop()]) })
+  const zlib = require('zlib')
+  const onDisk = (node, gid) => {
+    const dir = path.join(node.store.groupsDir, gid)
+    return fs.readdirSync(dir).map((f) => {
+      const buf = fs.readFileSync(path.join(dir, f))
+      return f.endsWith('.br') ? zlib.brotliDecompressSync(buf).toString() : buf.toString()
+    }).join('\n')
+  }
+
+  const group = alice.store.createGroup('Stubs')
+  alice.net.joinGroup(group)
+  const gid = group.id
+  for (let i = 0; i < 300; i++) alice.store.append(gid, 'msg', { id: 'n' + i, ch: 'x', text: 'filler message number ' + i })
+  alice.store.append(gid, 'msg', { id: 'secret', ch: 'x', text: 'the vault code is quokka' })
+  alice.store.append(gid, 'msg.edit', { id: 'n1', text: 'first edit wombat' })
+  alice.store.append(gid, 'msg.edit', { id: 'n1', text: 'second edit' })
+  const del = alice.store.append(gid, 'msg.delete', { id: 'secret', ch: 'x', at: 0 })
+  assert.ok(Array.isArray(del.d.sup) && del.d.sup.length === 1, 'delete supersedes the message')
+  const ga = alice.store.groups.get(gid)
+  alice.store.compact(ga)
+  const disk = onDisk(alice, gid)
+  assert.ok(!disk.includes('vault code'), 'deleted text is gone from disk')
+  assert.ok(!disk.includes('edit wombat'), 'older edit is gone from disk')
+  assert.ok(disk.includes('second edit'))
+  const u = alice.store.messageUsage()
+  assert.ok(u.stubs >= 2 && u.disk < u.raw, 'stored compressed')
+
+  // reload from disk: same ops, stubs intact
+  const reloaded = new Store(alice.store.dir).load()
+  assert.strictEqual(reloaded.groups.get(gid).ops.length, ga.ops.length)
+  assert.strictEqual(reloaded.groups.get(gid).ops.filter(o => o.k === 'x').length, ga.ops.filter(o => o.k === 'x').length)
+
+  // A 0.3 peer only gets each author's ops up to the first stub (it can't verify stubs)
+  const old = alice.store.opsMissingFrom(gid, {}, { stubs: false })
+  assert.ok(old.every(o => o.k !== 'x'))
+  const firstStub = ga.ops.find(o => o.k === 'x' && o.a === alice.store.myKey).s
+  assert.ok(old.filter(o => o.a === alice.store.myKey).every(o => o.s < firstStub))
+
+  // Bob joins and syncs: he gets the stubs (with the ops that justify them), never the text
+  const { group: bg } = bob.store.joinGroup(alice.store.inviteFor(gid))
+  bob.net.joinGroup(bg)
+  await waitFor(() => synced(alice, bob, gid), 25000, 'bob to sync everything')
+  const gb = bob.store.groups.get(gid)
+  assert.ok(!JSON.stringify(gb.ops).includes('vault code'))
+  assert.ok(gb.ops.some(o => o.k === 'x' && o.a === alice.store.myKey))
+  assert.strictEqual(texts(bob, gid).length, 300)
+
+  // A live message deleted later is stubbed on bob's side too
+  const live = alice.store.append(gid, 'msg', { id: 'oops', ch: 'x', text: 'wrong chat sorry' })
+  alice.net.broadcastOps(gid, [live])
+  await waitFor(() => texts(bob, gid).includes('wrong chat sorry'), 5000, 'live message')
+  const d2 = alice.store.append(gid, 'msg.delete', { id: 'oops', ch: 'x', at: live.t })
+  alice.net.broadcastOps(gid, [d2])
+  await waitFor(() => !texts(bob, gid).includes('wrong chat sorry'), 5000, 'bob to drop the deleted message')
+  bob.store.compact(gb)
+  assert.ok(!onDisk(bob, gid).includes('wrong chat'))
+})

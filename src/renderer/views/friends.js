@@ -2,7 +2,7 @@
 // from a key exchange between your identities (see main/crypto.js dmSecret). Requests go
 // straight from your app to theirs; nothing stores them in between.
 import { html, useState, useEffect } from '../vendor/preact-htm.js'
-import { api, model, voice, act } from '../lib/core.js'
+import { api, model, voice, act, fmtStamp } from '../lib/core.js'
 import { DM_CALL, DM_TEXT, shortKey } from '../lib/model.js'
 import { playTone } from '../lib/voice.js'
 import { Icon } from '../lib/icons.js'
@@ -15,10 +15,12 @@ export function openDm (g) {
   model.selectChannel(g.id, DM_TEXT)
 }
 
-function added (r, name) {
+function added (r, name, viaLink = false) {
   model.addGroup(r)
   const key = model.groups.get(r.id)?.dm
-  model.toast(key && model.isFriend(key) ? `You and ${name || model.knownName(key)} are friends now` : `Friend request sent${name ? ' to ' + name : ''}`)
+  model.toast(key && model.isFriend(key)
+    ? `You and ${name || model.knownName(key)} are friends now`
+    : viaLink ? `You'll be friends with ${name || 'them'} as soon as they're online` : `Friend request sent${name ? ' to ' + name : ''}`)
 }
 
 export async function addFriendByKey (key, name) {
@@ -31,7 +33,7 @@ export async function addFriendByCode (code) {
   const r = await act(() => api.addFriend(code.trim(), ''), 'Could not add friend')
   if (!r) return null
   if (r.existed) model.toast('Already in your friends list')
-  else added(r, r.nameHint)
+  else added(r, r.nameHint, /^opendiscord:\/\//i.test(code.trim()))
   return r
 }
 
@@ -129,32 +131,52 @@ function FriendRow ({ g }) {
 
 function AddFriend () {
   const [code, setCode] = useState('')
+  const [link, setLink] = useState('')
   const [copied, setCopied] = useState(false)
   const [busy, setBusy] = useState(false)
-  const mine = model.friends.code
-  const copy = async () => { await api.copy(mine); setCopied(true); setTimeout(() => setCopied(false), 1500) }
+  const links = model.friends.links || []
+  const create = async () => {
+    const l = await act(() => api.createFriendLink(7 * 864e5))
+    if (l) { setLink(l); setCopied(false) }
+  }
+  const copy = async () => { await api.copy(link); setCopied(true); setTimeout(() => setCopied(false), 1500) }
   const send = async () => {
     setBusy(true)
     const r = await addFriendByCode(code)
     setBusy(false)
     if (r) { setCode(''); model.ui.friendsTab = 'pending'; model.emit() }
   }
-  const valid = /^ODF1-[A-Za-z0-9_-]{20,}$/.test(code.trim()) || /^[0-9a-f]{64}$/i.test(code.trim())
+  const c = code.trim()
+  const valid = /^opendiscord:\/\/friend\/[A-Za-z0-9_-]{80,}\/?$/i.test(c) || /^ODF1-[A-Za-z0-9_-]{20,}$/.test(c) || /^[0-9a-f]{64}$/i.test(c)
   return html`
     <div class="add-friend">
       <h3>Add a friend</h3>
-      <p class="muted">Swap friend codes, then one of you adds the other. Their app gets the request directly from yours as soon as you're both online.</p>
-      <label>Your friend code</label>
-      <div class="invite-box"><code class="mono">${mine}</code><button class="btn primary" onClick=${copy}><${Icon} name=${copied ? 'check' : 'copy'} size=${16} /> ${copied ? 'Copied' : 'Copy'}</button></div>
-      <label>Friend's code</label>
+      <p class="muted">Send a friend link to someone. When they open it, you're friends right away. Each link works once.</p>
+      <label>Your friend link</label>
+      ${link
+        ? html`
+          <div class="invite-box"><code class="mono">${link}</code><button class="btn primary" onClick=${copy}><${Icon} name=${copied ? 'check' : 'copy'} size=${16} /> ${copied ? 'Copied' : 'Copy'}</button></div>
+          <p class="hint">Works once and expires in 7 days. <a onClick=${create}>Make another</a></p>`
+        : html`<div class="row"><button class="btn primary create-friend-link" onClick=${create}><${Icon} name="link" size=${16} /> Create a friend link</button></div>`}
+      ${links.length > 0 && html`
+        <div class="invite-list">
+          <small>Unused friend links</small>
+          ${links.map(l => html`
+            <div class="invite-row" key=${l.id}>
+              <${Icon} name="ticket" size=${16} class="dim" />
+              <span>Made ${fmtStamp(l.at)}</span>
+              <button class="btn sm" onClick=${() => act(() => api.revokeFriendLink(l.id))}>Cancel link</button>
+            </div>`)}
+        </div>`}
+      <label>Got a link from a friend?</label>
       <div class="row add-row">
-        <input class="mono" value=${code} placeholder="ODF1-…" onInput=${(e) => setCode(e.target.value)} onKeyDown=${(e) => e.key === 'Enter' && valid && send()} />
-        <button class="btn primary" disabled=${!valid || busy} onClick=${send}>Send friend request</button>
+        <input class="mono" value=${code} placeholder="opendiscord://friend/…" onInput=${(e) => setCode(e.target.value)} onKeyDown=${(e) => e.key === 'Enter' && valid && send()} />
+        <button class="btn primary" disabled=${!valid || busy} onClick=${send}>Add friend</button>
       </div>
-      ${code.trim().startsWith('OD1-') && html`<p class="warn-text">That's a group invite, not a friend code. Use the + in the left bar to join a group.</p>`}
+      ${(c.startsWith('OD1-') || /^opendiscord:\/\/join\//i.test(c)) && html`<p class="warn-text">That's a group invite, not a friend link. Use the + in the left bar to join a group.</p>`}
       <div class="callout">
         <${Icon} name="shield" size=${16} />
-        <div>A friend code is your public key and name. It's safe to share: it lets people send you friend requests, but they can't read anything. You can also add people from any group you share: click their name in the member list.</div>
+        <div>Once someone used your link, it stops working, so a forwarded link can't add anyone else. You can also add people from any group you share: right-click their name in the member list.</div>
       </div>
     </div>`
 }
@@ -186,7 +208,7 @@ export function FriendsPage () {
           ${!list.length && html`
             <div class="friends-empty">
               <${Icon} name="users" size=${44} />
-              <p>${friends.length ? 'None of your friends are online right now.' : 'No friends yet. Share your friend code to get started.'}</p>
+              <p>${friends.length ? 'None of your friends are online right now.' : 'No friends yet. Send someone a friend link to get started.'}</p>
               ${!friends.length && html`<button class="btn primary" onClick=${() => setTab('add')}>Add a friend</button>`}
             </div>`}`}
         ${tab === 'pending' && html`
@@ -205,7 +227,7 @@ export function FriendsPage () {
           ${outgoing.map(r => html`
             <div key=${r.key} class="friend-row">
               <${Avatar} name=${r.name || model.knownName(r.key) || '?'} color=${model.memberColor(null, r.key)} src=${model.memberAvatar(null, r.key)} size=${36} />
-              <div class="fr-meta"><b>${r.name || model.knownName(r.key) || 'Friend ' + r.key.slice(0, 4)}</b><small>Waiting for them to accept. Delivered as soon as they're online.</small></div>
+              <div class="fr-meta"><b>${r.name || model.knownName(r.key) || 'Friend ' + r.key.slice(0, 4)}</b><small>${r.link ? "You opened their friend link. You'll be friends as soon as they're online." : "Waiting for them to accept. Delivered as soon as they're online."}</small></div>
               <div class="fr-actions">
                 <button class="round-btn danger" title="Cancel request" onClick=${() => removeFriendFlow(r.key)}><${Icon} name="x" size=${18} /></button>
               </div>

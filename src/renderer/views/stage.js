@@ -73,6 +73,44 @@ function ZoomableScreen ({ stream, onDblClick }) {
     </div>`
 }
 
+// Who is watching sharerKey's stream (me included)
+export function viewersOf (g, chId, sharerKey) {
+  const out = []
+  if (voice.inChannel(g.id, chId) && voice.watching.has(sharerKey)) out.push(model.me.key)
+  for (const [k, st] of g.voice) {
+    if (k !== sharerKey && st.ch === chId && Array.isArray(st.watch) && st.watch.includes(sharerKey) && !out.includes(k)) out.push(k)
+  }
+  return out
+}
+
+function Viewers ({ g, keys, me }) {
+  const names = keys.map(k => k === model.me.key ? 'You' : model.memberName(g, k))
+  return html`
+    <div class="tile-viewers ${keys.length ? '' : 'none'}" title=${keys.length ? 'Watching: ' + names.join(', ') : ''} onClick=${(e) => e.stopPropagation()}>
+      <${Icon} name="eye" size=${14} />
+      ${keys.length
+        ? html`<span class="viewer-stack">${keys.slice(0, 5).map(k => html`<${Avatar} key=${k} name=${model.memberName(g, k)} color=${model.memberColor(g, k)} src=${model.memberAvatar(g, k)} size=${18} />`)}</span><span class="viewer-names">${keys.length <= 2 ? names.join(', ') : keys.length + ' watching'}</span>`
+        : html`<span>${me ? 'Nobody is watching yet' : 'Nobody is watching'}</span>`}
+    </div>`
+}
+
+function StreamSound ({ k, name }) {
+  const muted = voice.screenMuted(k)
+  const toggle = async () => {
+    await saveSettings({ screenMutes: { ...model.settings.screenMutes, [k]: !muted } })
+    voice.applyOutputDevice()
+  }
+  return html`
+    <div class="tile-sound" onClick=${(e) => e.stopPropagation()}>
+      <button class="stream-mute ${muted ? 'off' : ''}" title=${muted ? 'Unmute stream sound' : 'Mute stream sound'} onClick=${toggle}>
+        <${Icon} name=${muted ? 'volumeX' : 'speaker'} size=${16} />
+      </button>
+      <input type="range" min="0" max="1" step="0.05" title=${'Stream volume for ' + name} disabled=${muted} value=${model.settings.screenVolumes?.[k] ?? 1}
+        onInput=${(e) => voice.setVolume(k, +e.target.value, 'screenAudio')}
+        onChange=${(e) => saveSettings({ screenVolumes: { ...model.settings.screenVolumes, [k]: +e.target.value } })} />
+    </div>`
+}
+
 export function participantsOf (g, chId) {
   const keys = []
   if (voice.inChannel(g.id, chId)) keys.push(model.me.key)
@@ -128,7 +166,8 @@ export function VoiceStage ({ g, ch }) {
 
   const stateOf = (k) => (k === model.me.key ? voice.statePayload() : g.voice.get(k) || {})
   const ids = keys.flatMap(k => (stateOf(k).screen ? [k + ':screen', k] : [k]))
-  const autoId = keys.filter(k => k !== model.me.key && stateOf(k).screen).map(k => k + ':screen')[0] || null
+  // spotlight the first stream you chose to watch
+  const autoId = keys.filter(k => k !== model.me.key && stateOf(k).screen && voice.watching.has(k)).map(k => k + ':screen')[0] || null
   const focusId = focus === 'grid' ? null : focus && ids.includes(focus) ? focus : autoId
   const toggle = (id) => setFocus(focusId === id ? 'grid' : id)
 
@@ -140,16 +179,37 @@ export function VoiceStage ({ g, ch }) {
     const call = me ? null : voice.calls.get(k)
     const name = model.memberName(g, k)
     if (st.screen) {
+      const watching = me || voice.watching.has(k)
       const stream = me ? voice.local.screen : call?.remoteStreams.screen
+      const live = me ? !!stream : !!stream && !!call.remote.screen && !call.remote.screen.muted
       const s = call?.stats?.screen
+      const viewers = viewersOf(g, ch.id, k)
+      const watch = (e) => { e.stopPropagation(); voice.watchScreen(k); setFocus(null) }
+      const unwatch = (e) => { e.stopPropagation(); voice.unwatchScreen(k) }
       screens.push({
         id: k + ':screen',
         el: html`
-          <div class="tile screen" onClick=${() => toggle(k + ':screen')}>
-            ${stream ? (me ? html`<${Video} stream=${stream} onDblClick=${fullscreen} />` : html`<${ZoomableScreen} stream=${stream} onDblClick=${fullscreen} />`) : html`<div class="tile-wait">Connecting to stream…</div>`}
-            <div class="tile-label"><span class="live">LIVE</span> ${me ? 'Your screen' : name + "'s screen"}</div>
-            <div class="tile-stats">${me ? sendStatsLabel(st.screenLabel) : s ? `${s.w}×${s.h} · ${s.fps} fps · ${fmtRate(s.kbps)}${s.codec ? ' · ' + s.codec : ''}` : ''}</div>
-            <button class="tile-fs" title="Fullscreen" onClick=${(e) => { e.stopPropagation(); fullscreen(e) }}><${Icon} name="maximize" size=${18} /></button>
+          <div class="tile screen ${watching ? '' : 'unwatched'}" onClick=${() => { if (watching) toggle(k + ':screen') }}>
+            ${!watching
+              ? html`
+                <div class="watch-card">
+                  <${Avatar} name=${name} color=${model.memberColor(g, k)} src=${model.memberAvatar(g, k)} size=${44} />
+                  <b><span class="live">LIVE</span> ${name} is streaming</b>
+                  <small>${st.screenLabel || 'Screen share'}${st.screenAudio ? ' · with sound' : ''}${viewers.length ? ` · ${viewers.length} watching` : ''}</small>
+                  <button class="btn primary sm watch-btn" onClick=${watch}><${Icon} name="eye" size=${16} /> Watch stream</button>
+                </div>`
+              : me
+                ? html`<${Video} stream=${stream} onDblClick=${fullscreen} />`
+                : html`${stream && html`<${ZoomableScreen} stream=${stream} onDblClick=${fullscreen} />`}${!live && html`<div class="tile-wait">Connecting to stream…</div>`}`}
+            ${watching && html`<div class="tile-label"><span class="live">LIVE</span> ${me ? 'Your screen' : name + "'s screen"}</div>`}
+            ${watching && html`<div class="tile-stats">${me ? sendStatsLabel(st.screenLabel) : s ? `${s.w}×${s.h} · ${s.fps} fps · ${fmtRate(s.kbps)}${s.codec ? ' · ' + s.codec : ''}` : ''}</div>`}
+            ${watching && html`<${Viewers} g=${g} keys=${viewers} me=${me} />`}
+            ${watching && html`
+              <div class="tile-actions ${!me && st.screenAudio && voice.screenMuted(k) ? 'pinned' : ''}" onClick=${(e) => e.stopPropagation()}>
+                ${!me && html`<button title="Stop watching" class="stop-watch" onClick=${unwatch}><${Icon} name="eyeOff" size=${18} /></button>`}
+                <button title="Fullscreen" onClick=${(e) => { e.stopPropagation(); fullscreen(e) }}><${Icon} name="maximize" size=${18} /></button>
+                ${!me && st.screenAudio && html`<${StreamSound} k=${k} name=${name} />`}
+              </div>`}
           </div>`
       })
     }
@@ -170,7 +230,7 @@ export function VoiceStage ({ g, ch }) {
           ${!me && html`
             <label class="tile-volume" title=${'Volume for ' + name} onClick=${(e) => e.stopPropagation()}>
               <${Icon} name="speaker" size=${14} />
-              <input type="range" min="0" max="1" step="0.05" value=${model.settings.volumes?.[k] ?? 1}
+              <input type="range" min="0" max="1" step="0.05" title=${'Voice volume for ' + name} value=${model.settings.volumes?.[k] ?? 1}
                 onInput=${(e) => voice.setVolume(k, +e.target.value)}
                 onChange=${(e) => saveSettings({ volumes: { ...model.settings.volumes, [k]: +e.target.value } })} />
             </label>`}

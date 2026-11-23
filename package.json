@@ -1,7 +1,7 @@
 {
   "name": "opendiscord",
   "productName": "OpenDiscord",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Serverless, end-to-end encrypted P2P chat, voice and screen sharing for a small group of friends",
   "main": "src/main/main.js",
   "private": true,
@@ -53,6 +53,14 @@
       "**/prebuilds/**"
     ],
     "icon": "build/icon.png",
+    "protocols": [
+      {
+        "name": "OpenDiscord link",
+        "schemes": [
+          "opendiscord"
+        ]
+      }
+    ],
     "win": {
       "target": [
         "nsis",
