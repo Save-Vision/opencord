@@ -1,15 +1,18 @@
-import { html, render, useState, useEffect, useRef } from './vendor/preact-htm.js'
-import { api, model, voice, useModel, act, initials, handleNewOps, onBlobProgress, retryMissingBlobs } from './lib/core.js'
+import { html, render, useEffect } from './vendor/preact-htm.js'
+import { api, model, voice, useModel, initials, handleNewOps, onBlobProgress, retryMissingBlobs } from './lib/core.js'
 import { shortKey, HOME, DM_CALL } from './lib/model.js'
 import { Icon } from './lib/icons.js'
-import { ChatView, Avatar, leaveGroupFlow, ThreadPanel } from './views/chat.js'
-import { PlannerView, startReminders, myOpenTasks, eventsToday } from './views/planner.js'
-import { VoiceStage, participantsOf, viewersOf, connLabel, MuteIcons } from './views/stage.js'
+import { loadClaudeInfo } from './lib/claude.js'
+import { ChatView, Avatar, ThreadPanel } from './views/chat.js'
+import { PlannerView, startReminders } from './views/planner.js'
+import { VoiceStage, viewersOf, connLabel } from './views/stage.js'
 import { Modals, ProfileEditor } from './views/modals.js'
 import { NetworkHealth } from './views/nethealth.js'
 import { initUpdates, UpdatePill } from './views/updates.js'
-import { Members, DmProfile, MemberMenu, openMemberMenu } from './views/members.js'
+import { Members, DmProfile, MemberMenu } from './views/members.js'
 import { HomeSidebar, FriendsPage, CallBanner, homeUnread, openDm } from './views/friends.js'
+import { Sidebar } from './views/sidebar.js'
+import { GamesView, notifyGameOps } from './views/games.js'
 
 // ---------------------------------------------------------------- shell
 
@@ -19,8 +22,11 @@ function App () {
   const home = model.ui.gid === HOME || !!g?.dm
   const stage = model.ui.stage && g && model.ui.stage.gid === g.id ? g.channels.get(model.ui.stage.ch) : null
   const ch = g ? model.currentChannel(g) : null
-  const planner = !stage && g && model.ui.planner?.gid === g.id
+  const games = !stage && g && model.ui.games?.gid === g.id
+  const planner = !stage && !games && g && model.ui.planner?.gid === g.id
   const thread = !stage && !planner && g && model.ui.thread?.gid === g.id
+  // A board has its chat in the thread next to it; the games list has nothing on the side
+  const side = g && !stage && !planner && !(games && !model.ui.games.id)
 
   useEffect(() => {
     let total = 0
@@ -47,13 +53,15 @@ function App () {
             ? html`<${Welcome} />`
             : stage && !stage.deleted
               ? html`<${VoiceStage} g=${g} ch=${stage} />`
-              : planner
+              : games
+                ? html`<${GamesView} g=${g} />`
+                : planner
                 ? html`<${PlannerView} g=${g} />`
                 : ch
                   ? html`<${ChatView} g=${g} ch=${ch} />`
                   : html`<${Syncing} g=${g} />`}
       </main>
-      ${g && !stage && !planner && (thread ? html`<${ThreadPanel} key=${model.ui.thread.id} g=${g} />` : g.dm ? html`<${DmProfile} g=${g} />` : html`<${Members} g=${g} />`)}
+      ${side && (thread ? html`<${ThreadPanel} key=${model.ui.thread.id} g=${g} />` : g.dm ? html`<${DmProfile} g=${g} />` : html`<${Members} g=${g} />`)}
     </div>
     <${CallBanner} />
     <${MemberMenu} />
@@ -118,102 +126,6 @@ function Rail ({ home }) {
         <button class="rail-btn add" title="Create or join a group" onClick=${() => model.openModal('addGroup')}><${Icon} name="plus" size=${22} /></button>
       </div>
     </nav>`
-}
-
-function GroupMenu ({ g, onClose }) {
-  const ref = useRef()
-  useEffect(() => {
-    const off = (e) => { if (ref.current && !ref.current.contains(e.target)) onClose() }
-    setTimeout(() => document.addEventListener('mousedown', off), 0)
-    return () => document.removeEventListener('mousedown', off)
-  }, [])
-  const item = (icon, label, fn, cls = '') => html`<button class=${cls} onClick=${() => { onClose(); fn() }}><span>${label}</span><${Icon} name=${icon} size=${16} /></button>`
-  return html`
-    <div class="dropdown" ref=${ref}>
-      ${model.canInvite(g) && item('userPlus', 'Invite people', () => model.openModal('invite', { gid: g.id }), 'accent')}
-      ${item('calendar', 'Calendar', () => model.openPlanner(g.id, 'calendar'))}
-      ${item('tasks', 'Tasks', () => model.openPlanner(g.id, 'tasks'))}
-      ${item('hash', 'Create text channel', () => model.openModal('channel', { gid: g.id, kind: 'text' }))}
-      ${item('speaker', 'Create voice channel', () => model.openModal('channel', { gid: g.id, kind: 'voice' }))}
-      ${item('edit', 'Rename group', () => model.openModal('renameGroup', { gid: g.id }))}
-      ${item('image', 'Change group picture', () => model.openModal('groupIcon', { gid: g.id }))}
-      <hr />
-      ${item('leave', 'Leave group', () => leaveGroupFlow(g), 'danger')}
-    </div>`
-}
-
-function Sidebar ({ g, ch, stage, footer }) {
-  const [menu, setMenu] = useState(false)
-  const text = model.channelsOf(g, 'text')
-  const voiceChs = model.channelsOf(g, 'voice')
-  const planner = !stage && model.ui.planner?.gid === g.id ? model.ui.planner.tab : null
-  const openText = (c) => { model.ui.stage = null; model.selectChannel(g.id, c.id) }
-  const today = eventsToday(g)
-  const mine = myOpenTasks(g)
-  const openVoice = (c) => {
-    model.ui.stage = { gid: g.id, ch: c.id }
-    model.emit()
-    if (!voice.inChannel(g.id, c.id) && !g.kickedMe) act(() => voice.join(g.id, c.id))
-  }
-  const edit = (e, c) => { e.stopPropagation(); model.openModal('channel', { gid: g.id, chId: c.id }) }
-  return html`
-    <aside class="sidebar">
-      <header class="group-header" onClick=${() => setMenu(!menu)}>
-        ${g.icon && html`<img class="gh-icon" src=${g.icon} alt="" />`}
-        <h1>${model.groupName(g)}</h1>
-        <${Icon} name=${menu ? 'x' : 'chevronDown'} size=${18} />
-      </header>
-      ${menu && html`<${GroupMenu} g=${g} onClose=${() => setMenu(false)} />`}
-      <div class="channels">
-        ${model.canInvite(g) && html`<button class="invite-cta" onClick=${() => model.openModal('invite', { gid: g.id })}><${Icon} name="userPlus" size=${16} /> Invite friends</button>`}
-        <button class="channel planner-link ${planner === 'calendar' ? 'active' : ''}" onClick=${() => model.openPlanner(g.id, 'calendar')}>
-          <${Icon} name="calendar" size=${18} class="dim" /><span class="ch-name">Calendar</span>
-          ${today > 0 && html`<span class="soft-badge" title="Events today">${today} today</span>`}
-        </button>
-        <button class="channel planner-link ${planner === 'tasks' ? 'active' : ''}" onClick=${() => model.openPlanner(g.id, 'tasks')}>
-          <${Icon} name="tasks" size=${18} class="dim" /><span class="ch-name">Tasks</span>
-          ${mine > 0 && html`<span class="soft-badge" title="Open tasks assigned to you">${mine}</span>`}
-        </button>
-        <div class="section-head"><span>Text channels</span><button class="icon-btn small" title="Create text channel" onClick=${() => model.openModal('channel', { gid: g.id, kind: 'text' })}><${Icon} name="plus" size=${16} /></button></div>
-        ${text.map((c) => {
-          const u = model.unread(g, c.id)
-          const active = !stage && !planner && ch?.id === c.id
-          return html`
-            <button key=${c.id} class="channel ${active ? 'active' : ''} ${u.count ? 'unread' : ''}" onClick=${() => openText(c)}>
-              <${Icon} name="hash" size=${18} class="dim" /><span class="ch-name">${c.name}</span>
-              ${u.mentions > 0 && html`<span class="badge">${u.mentions}</span>`}
-              <span class="ch-edit" title="Edit channel" onClick=${(e) => edit(e, c)}><${Icon} name="settings" size=${14} /></span>
-            </button>`
-        })}
-        <div class="section-head"><span>Voice channels</span><button class="icon-btn small" title="Create voice channel" onClick=${() => model.openModal('channel', { gid: g.id, kind: 'voice' })}><${Icon} name="plus" size=${16} /></button></div>
-        ${voiceChs.map((c) => {
-          const keys = participantsOf(g, c.id)
-          return html`
-            <div key=${c.id}>
-              <button class="channel ${stage?.id === c.id ? 'active' : ''} ${voice.inChannel(g.id, c.id) ? 'connected' : ''}" onClick=${() => openVoice(c)}>
-                <${Icon} name="speaker" size=${18} class="dim" /><span class="ch-name">${c.name}</span>
-                <span class="ch-edit" title="Edit channel" onClick=${(e) => edit(e, c)}><${Icon} name="settings" size=${14} /></span>
-              </button>
-              ${keys.map((k) => {
-                const me = k === model.me.key
-                const st = me ? voice.statePayload() : g.voice.get(k) || {}
-                const watches = (st.watch || []).filter(w => keys.includes(w))
-                const viewers = st.screen ? viewersOf(g, c.id, k).length : 0
-                return html`
-                  <div key=${k} class="voice-user ${voice.speaking.has(k) ? 'speaking' : ''}" onContextMenu=${(e) => openMemberMenu(e, g, k)} title="Right-click for options">
-                    <${Avatar} name=${model.memberName(g, k)} color=${model.memberColor(g, k)} src=${model.memberAvatar(g, k)} size=${22} speaking=${voice.speaking.has(k)} />
-                    <span class="vu-name">${model.memberName(g, k)}</span>
-                    ${watches.length > 0 && html`<span class="vu-watch" title=${'Watching ' + watches.map(w => w === model.me.key ? 'your' : model.memberName(g, w) + "'s").join(', ') + ' stream'}><${Icon} name="eye" size=${13} /></span>`}
-                    ${st.screen && html`<span class="live" title=${viewers ? viewers + ' watching' : 'Nobody watching'}>LIVE${viewers ? ' · ' + viewers : ''}</span>`}
-                    ${st.cam && html`<${Icon} name="camera" size=${14} class="dim" />`}
-                    <${MuteIcons} g=${g} k=${k} st=${st} />
-                  </div>`
-              })}
-            </div>`
-        })}
-      </div>
-      ${footer}
-    </aside>`
 }
 
 function VoicePanel () {
@@ -361,6 +273,7 @@ async function boot () {
     if (!model.groups.has(gid)) return
     const fresh = model.applyOps(gid, ops)
     handleNewOps(gid, fresh)
+    notifyGameOps(api, gid, fresh)
     if (fresh.some(op => op.k === 'voice.mute' || op.k === 'member.role' || op.k === 'member.kick')) voice.onModeration()
   })
   api.on('membership', (gid, info) => {
@@ -402,6 +315,9 @@ async function boot () {
       case 'move':
         voice.onMove(gid, from, d)
         break
+      case 'claude':
+        model.setClaudeDraft(gid, from, d)
+        break
     }
   })
   api.on('blob-progress', onBlobProgress)
@@ -417,6 +333,7 @@ async function boot () {
   window.addEventListener('beforeunload', () => voice.leave(true))
   window.__od = { model, voice } // handy for poking around in DevTools (Ctrl+Shift+I)
   startReminders({ api })
+  loadClaudeInfo()
 
   render(html`<${App} />`, document.getElementById('root'))
 }

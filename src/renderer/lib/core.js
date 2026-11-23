@@ -160,13 +160,15 @@ export function handleNewOps (gid, ops) {
     const th = typeof op.d.th === 'string' && !op.d.also ? op.d.th : null
     // Thread replies only notify people in the thread (or mentioned), like Slack
     if (th && !model.follows(g, th) && !model.mentionsMe(op.d.text)) continue
-    const here = model.ui.focused && model.ui.gid === gid && !model.ui.stage && !model.ui.planner
-    const viewing = th ? here && model.ui.thread?.id === th : here && model.currentChannel(g)?.id === op.d.ch
+    const here = model.ui.focused && model.ui.gid === gid && !model.ui.stage && !model.ui.planner && !model.ui.games
+    const threadHere = model.ui.focused && model.ui.gid === gid && !model.ui.stage && !model.ui.planner
+    const viewing = th ? threadHere && model.ui.thread?.id === th : here && model.currentChannel(g)?.id === op.d.ch
     if (viewing) continue
     api.attention()
     if (!model.settings.notifications) continue
     try {
-      const where = g.dm ? model.memberName(g, op.a) : `${model.memberName(g, op.a)} · #${ch?.name || 'channel'}`
+      const author = op.d.bot ? 'Claude' : model.memberName(g, op.a)
+      const where = g.dm ? author : `${author} · #${ch?.name || 'channel'}`
       const n = new Notification(th ? where + ' · thread' : where, {
         body: (op.d.text || '').slice(0, 180) || (op.d.att?.length ? '📎 sent a file' : ''),
         icon: model.memberAvatar(g, op.a) || undefined,

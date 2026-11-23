@@ -3,7 +3,7 @@
 const { contextBridge, ipcRenderer, webUtils } = require('electron')
 
 const EVENTS = new Set(['ops', 'peer-join', 'peer-leave', 'peer-update', 'eph', 'blob-progress', 'focus-change', 'hotkey', 'update', 'membership', 'friends',
-  'group-added', 'group-removed', 'joins', 'notice', 'open-link'])
+  'group-added', 'group-removed', 'joins', 'notice', 'open-link', 'claude-update'])
 const invoke = (ch, ...args) => ipcRenderer.invoke(ch, ...args)
 
 contextBridge.exposeInMainWorld('od', {
@@ -37,6 +37,12 @@ contextBridge.exposeInMainWorld('od', {
   cleanStorage: (days) => invoke('storage:clean', days),
 
   linkPreview: (url) => invoke('link:preview', url),
+
+  claudeInfo: () => invoke('claude:info'),
+  claudeSetKey: (key) => invoke('claude:set-key', key),
+  claudeClearKey: () => invoke('claude:clear-key'),
+  claudeAsk: (id, req) => invoke('claude:ask', id, req),
+  claudeCancel: (id) => invoke('claude:cancel', id),
 
   append: (gid, kind, data) => invoke('op:append', gid, kind, data),
   sendEph: (gid, to, data) => ipcRenderer.send('eph', gid, to, data),

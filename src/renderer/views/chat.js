@@ -7,7 +7,9 @@ import { renderMarkdown, renderMarkdownDoc, isEmojiOnly, previewableUrls } from 
 import { highlight, extOf, langFor, langLabel } from '../lib/highlight.js'
 import { DM_CALL } from '../lib/model.js'
 import { Icon } from '../lib/icons.js'
+import { askClaude, mentionsClaude, claudeBlocked, stopClaude, MODEL_LABEL } from '../lib/claude.js'
 import { EmojiPanel, EmojiSuggest, loadEmoji, searchEmoji, rememberEmoji } from './emoji.js'
+import { GameCard } from './games.js'
 
 const drafts = new Map()
 const PAGE = 150
@@ -19,6 +21,16 @@ export function Avatar ({ name, color, src = null, size = 40, speaking = false, 
       ${dot && html`<i class="presence ${dot}" />`}
     </div>`
 }
+
+export function ClaudeAvatar ({ size = 40 }) {
+  return html`<div class="avatar claude-avatar" style=${{ width: size + 'px', height: size + 'px' }}><${Icon} name="sparkle" size=${Math.round(size * 0.55)} /></div>`
+}
+
+// Names that highlight as @mentions: members, and Claude
+const useNames = (g) => useMemo(() => new Set(['claude', ...[...g.members.values()].map(m => (m.name || '').toLowerCase()).filter(Boolean)]), [g.members.size, model.me.name])
+
+// Messages run together under one name when the same person posts again soon after
+const groupable = (prev, m) => !!prev && prev.a === m.a && !!prev.bot === !!m.bot && !prev.game && !m.game && m.t - prev.t < 7 * 60 * 1000
 
 export function jumpToMessage (id) {
   // A reply that lives only in a thread: open the thread instead
@@ -74,11 +86,12 @@ export function ThreadPanel ({ g }) {
   useLayoutEffect(() => { if (stick.current && ref.current) ref.current.scrollTop = ref.current.scrollHeight })
   useEffect(() => { if (model.ui.focused) model.markThreadRead(g.id, id) })
   useEffect(() => { stick.current = true }, [id])
-  const names = useMemo(() => new Set([...g.members.values()].map(m => (m.name || '').toLowerCase()).filter(Boolean)), [g.members.size, model.me.name])
+  const names = useNames(g)
   const ctx = { names, myName: (model.me.name || '').toLowerCase(), openLink: (u) => openLink(u) }
+  const drafts = [...g.claudeDrafts.values()].filter(x => x.th === id)
   const onScroll = () => {
     const el = ref.current
-    stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 60
+    if (el) stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 60
   }
   const onMediaLoad = () => { if (stick.current && ref.current) ref.current.scrollTop = ref.current.scrollHeight }
   let prev = null
@@ -96,10 +109,11 @@ export function ThreadPanel ({ g }) {
           : html`<div class="thread-missing"><${Icon} name="trash" size=${16} /> The message this thread started from was deleted.</div>`}
         <div class="thread-divider"><span>${replies.length ? `${replies.length} ${replies.length === 1 ? 'reply' : 'replies'}` : 'No replies yet'}</span></div>
         ${replies.map((m) => {
-          const grouped = prev && prev.a === m.a && m.t - prev.t < 7 * 60 * 1000
+          const grouped = groupable(prev, m)
           prev = m
           return html`<${Message} key=${m.id} g=${g} m=${m} grouped=${grouped} ctx=${ctx} onMediaLoad=${onMediaLoad} inThread=${true} />`
         })}
+        ${drafts.map(d => html`<${ClaudeDraft} key=${d.id} g=${g} d=${d} ctx=${ctx} />`)}
       </div>
       ${ch && html`<${Composer} key=${'t' + g.id + id} g=${g} ch=${ch} thread=${id} />`}
     </aside>`
@@ -144,6 +158,9 @@ export function ChatView ({ g, ch }) {
         ${dm && html`<button class="icon-btn" title=${voice.inChannel(g.id, DM_CALL) ? 'Open call' : 'Start a call'} onClick=${() => startDmCall(g)}><${Icon} name="phone" /></button>`}
         ${dm && html`<button class="icon-btn" title="Shared calendar" onClick=${() => model.openPlanner(g.id, 'calendar')}><${Icon} name="calendar" /></button>`}
         ${dm && html`<button class="icon-btn" title="Shared tasks" onClick=${() => model.openPlanner(g.id, 'tasks')}><${Icon} name="tasks" /></button>`}
+        ${dm
+          ? html`<button class="icon-btn" title="Games" onClick=${() => model.openGames(g.id)}><${Icon} name="chess" /></button>`
+          : !g.kickedMe && html`<button class="icon-btn" title="Play chess in this channel" onClick=${() => model.openModal('newGame', { gid: g.id, ch: ch.id })}><${Icon} name="chess" /></button>`}
         <${PinsButton} g=${g} ch=${ch} />
         ${!dm && model.canInvite(g) && html`<button class="icon-btn" title="Invite friends" onClick=${() => model.openModal('invite', { gid: g.id })}><${Icon} name="userPlus" /></button>`}
       </header>
@@ -262,6 +279,7 @@ function MessageList ({ g, ch }) {
   const lastTop = useRef(0)
   const onScroll = () => {
     const el = ref.current
+    if (!el) return
     const bottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60
     // Only an upward scroll means "the user left the bottom". Our own scroll-to-bottom can land
     // a frame after content grew (a file preview loaded), and must not unpin the view.
@@ -286,8 +304,9 @@ function MessageList ({ g, ch }) {
     return () => ro.disconnect()
   }, [])
 
-  const names = useMemo(() => new Set([...g.members.values()].map(m => (m.name || '').toLowerCase()).filter(Boolean)), [g.members.size, model.me.name])
+  const names = useNames(g)
   const ctx = { names, myName: (model.me.name || '').toLowerCase(), openLink: (u) => openLink(u) }
+  const drafts = model.claudeDraftsIn(g, ch.id)
 
   const rows = []
   let prev = shown.length < list.length ? null : undefined
@@ -298,7 +317,7 @@ function MessageList ({ g, ch }) {
       shownNew = true
       rows.push(html`<div class="new-divider" key="new"><span>NEW</span></div>`)
     }
-    const grouped = prev && prev.a === m.a && m.t - prev.t < 7 * 60 * 1000 && fmtDay(prev.t) === fmtDay(m.t) && !m.re && !m.also && !m.deleted && !prev.deleted && !model.threadInfo(g, prev.id)
+    const grouped = groupable(prev, m) && fmtDay(prev.t) === fmtDay(m.t) && !m.re && !m.also && !m.deleted && !prev.deleted && !model.threadInfo(g, prev.id)
     rows.push(html`<${Message} key=${m.id} g=${g} m=${m} grouped=${grouped} ctx=${ctx} onMediaLoad=${onMediaLoad} />`)
     prev = m
   }
@@ -320,17 +339,36 @@ function MessageList ({ g, ch }) {
             <p>This is the start of the channel. Messages are signed by their author and synced directly between your devices — there is no server.</p>
           </div>`)}
       ${rows}
+      ${drafts.map(d => html`<${ClaudeDraft} key=${d.id} g=${g} d=${d} ctx=${ctx} />`)}
       <div class="messages-end" />
     </div></div>
     ${!atBottom && html`<button class="jump" onClick=${() => { stick.current = true; ref.current.scrollTop = ref.current.scrollHeight }}>Jump to present ↓</button>`}`
 }
 
+// An answer Claude is still writing, streamed live from the asker's app
+function ClaudeDraft ({ g, d, ctx }) {
+  const md = useMemo(() => (d.text ? renderMarkdownDoc(d.text, ctx) : null), [d.text])
+  return html`
+    <div class="msg bot draft">
+      <div class="msg-avatar"><${ClaudeAvatar} /></div>
+      <div class="msg-body">
+        <div class="msg-head"><span class="author claude-name">Claude</span><span class="bot-tag">AI</span><small class="asked-by">for ${model.memberName(g, d.by)}</small></div>
+        ${md
+          ? html`<div class="text">${md}</div>`
+          : html`<div class="text thinking"><span class="dots"><i /><i /><i /></span> ${d.status || 'Thinking…'}</div>`}
+        ${md && d.status && html`<small class="muted">${d.status}</small>`}
+        ${d.by === model.me.key && html`<button class="btn sm stop-btn" onClick=${() => stopClaude(d.id)}><${Icon} name="stop" size=${11} /> Stop</button>`}
+      </div>
+    </div>`
+}
+
 function Message ({ g, m, grouped, ctx, onMediaLoad, inThread = false }) {
   const mine = m.a === model.me.key
+  const bot = !!m.bot
   const editing = model.ui.editing === m.id
   const [picker, setPicker] = useState(false)
-  const name = model.memberName(g, m.a)
-  const color = model.memberColor(g, m.a)
+  const name = bot ? 'Claude' : model.memberName(g, m.a)
+  const color = bot ? null : model.memberColor(g, m.a)
   // deleted, but replies in its thread keep it in the channel
   if (m.deleted) {
     if (inThread || !model.threadInfo(g, m.id)) return null
@@ -343,7 +381,7 @@ function Message ({ g, m, grouped, ctx, onMediaLoad, inThread = false }) {
         </div>
       </div>`
   }
-  if (!m._md || m._mdText !== m.text) { m._md = renderMarkdown(m.text, ctx); m._mdText = m.text }
+  if (!m._md || m._mdText !== m.text) { m._md = bot ? renderMarkdownDoc(m.text, ctx) : renderMarkdown(m.text, ctx); m._mdText = m.text }
   const threadRoot = m.also ? g.msgById.get(m.th) : null
   const mention = !mine && model.mentionsMe(m.text)
   const parent = m.re ? g.msgById.get(m.re) : null
@@ -363,7 +401,7 @@ function Message ({ g, m, grouped, ctx, onMediaLoad, inThread = false }) {
   const pin = () => act(() => append(g.id, 'msg.pin', { id: m.id, on: !pinned }))
 
   return html`
-    <div id=${'msg-' + m.id} class="msg ${grouped ? 'grouped' : ''} ${mention ? 'mention' : ''} ${editing ? 'editing' : ''} ${pinned ? 'pinned' : ''}">
+    <div id=${'msg-' + m.id} class="msg ${grouped ? 'grouped' : ''} ${mention ? 'mention' : ''} ${editing ? 'editing' : ''} ${pinned ? 'pinned' : ''} ${bot ? 'bot' : ''} ${m.game ? 'has-game' : ''}">
       ${m.also && !inThread && html`
         <div class="reply-ref thread-ref" onClick=${() => model.openThread(g.id, m.th)}>
           <${Icon} name="thread" size=${13} />
@@ -374,17 +412,24 @@ function Message ({ g, m, grouped, ctx, onMediaLoad, inThread = false }) {
         <div class="reply-ref" onClick=${() => jumpToMessage(m.re)}>
           <span class="reply-line" />
           ${parent && !parent.deleted
-            ? html`<b style=${{ color: model.memberColor(g, parent.a) }}>${model.memberName(g, parent.a)}</b><span class="reply-snippet">${snippet(parent.text) || '📎 attachment'}</span>`
+            ? html`<b class=${parent.bot ? 'claude-name' : ''} style=${parent.bot ? null : { color: model.memberColor(g, parent.a) }}>${parent.bot ? 'Claude' : model.memberName(g, parent.a)}</b><span class="reply-snippet">${parent.game ? '♟ chess game' : snippet(parent.text) || '📎 attachment'}</span>`
             : html`<i>Original message was deleted</i>`}
         </div>`}
       ${grouped
         ? html`<span class="gutter-time">${fmtTime(m.t)}</span>`
-        : html`<div class="msg-avatar"><${Avatar} name=${name} color=${color} src=${model.memberAvatar(g, m.a)} /></div>`}
+        : html`<div class="msg-avatar">${bot ? html`<${ClaudeAvatar} />` : html`<${Avatar} name=${name} color=${color} src=${model.memberAvatar(g, m.a)} />`}</div>`}
       <div class="msg-body">
-        ${!grouped && html`<div class="msg-head"><span class="author" style=${{ color }}>${name}</span><time title=${new Date(m.t).toLocaleString()}>${fmtStamp(m.t)}</time>${pinned && html`<span class="pin-mark" title="Pinned"><${Icon} name="pin" size=${12} /></span>`}</div>`}
+        ${!grouped && html`
+          <div class="msg-head">
+            <span class="author ${bot ? 'claude-name' : ''}" style=${color ? { color } : null}>${name}</span>
+            ${bot && html`<span class="bot-tag">AI</span><small class="asked-by" title="Asked with their own API key">for ${model.memberName(g, m.a)} · ${MODEL_LABEL[m.bot.model] || m.bot.model || 'Claude'}</small>`}
+            <time title=${new Date(m.t).toLocaleString()}>${fmtStamp(m.t)}</time>${pinned && html`<span class="pin-mark" title="Pinned"><${Icon} name="pin" size=${12} /></span>`}
+          </div>`}
         ${editing
           ? html`<${EditBox} g=${g} m=${m} />`
-          : m.text && html`<div class="text ${isEmojiOnly(m.text) ? 'jumbo' : ''}">${m._md}${m.edited ? html`<span class="edited" title=${'Edited ' + new Date(m.edited).toLocaleString()}> (edited)</span>` : ''}${grouped && pinned ? html`<span class="pin-mark" title="Pinned"><${Icon} name="pin" size=${12} /></span>` : ''}</div>`}
+          : m.game
+            ? html`<${GameCard} g=${g} m=${m} />`
+            : m.text && html`<div class="text ${isEmojiOnly(m.text) ? 'jumbo' : ''}">${m._md}${m.edited ? html`<span class="edited" title=${'Edited ' + new Date(m.edited).toLocaleString()}> (edited)</span>` : ''}${grouped && pinned ? html`<span class="pin-mark" title="Pinned"><${Icon} name="pin" size=${12} /></span>` : ''}</div>`}
         ${m.att.length > 0 && html`<div class="attachments">${m.att.map(a => html`<${Attachment} key=${a.h} g=${g} a=${a} onLoad=${onMediaLoad} />`)}</div>`}
         ${embeds.length > 0 && html`<div class="embeds">${embeds.map(e => html`<${Embed} key=${e.url} e=${e} onLoad=${onMediaLoad} />`)}</div>`}
         ${m.reactions.size > 0 && html`
@@ -403,7 +448,7 @@ function Message ({ g, m, grouped, ctx, onMediaLoad, inThread = false }) {
           ${!inThread && html`<button title="Reply" onClick=${() => { model.ui.replyTo = m.id; model.emit(); document.querySelector('.chat .composer textarea')?.focus() }}><${Icon} name="reply" size=${18} /></button>`}
           ${!inThread && !m.th && html`<button title="Reply in thread" class="thread-btn" onClick=${() => model.openThread(g.id, m.id)}><${Icon} name="thread" size=${18} /></button>`}
           <button title=${pinned ? 'Unpin' : 'Pin message'} class=${pinned ? 'on' : ''} onClick=${pin}><${Icon} name="pin" size=${18} /></button>
-          ${mine && html`<button title="Edit" onClick=${() => { model.ui.editing = m.id; model.emit() }}><${Icon} name="edit" size=${18} /></button>`}
+          ${mine && !bot && !m.game && html`<button title="Edit" onClick=${() => { model.ui.editing = m.id; model.emit() }}><${Icon} name="edit" size=${18} /></button>`}
           ${mine && html`<button title="Delete (shift-click to skip confirmation)" class="danger" onClick=${del}><${Icon} name="trash" size=${18} /></button>`}
         </div>`}
       ${picker && html`<${EmojiPanel} class="for-message" onPick=${react} onClose=${() => setPicker(false)} />`}
@@ -560,6 +605,46 @@ async function attachPreviews (gid, id, text) {
 }
 
 const SHORTCODE = /(^|[\s(])(:[\w+-]{2,32})$/
+const MENTION = /(^|[\s(])@([\p{L}\p{N}_.-]{0,32})$/u
+
+// "@cl…": people in the chat, and Claude
+function mentionItems (g, query) {
+  const q = query.toLowerCase()
+  const out = []
+  if ('claude'.startsWith(q)) out.push({ kind: 'claude', label: 'Claude', insert: '@claude', hint: model.claude?.hasKey ? 'Ask Claude (your API key)' : 'Needs your API key' })
+  for (const m of model.membersOf(g)) {
+    const name = model.memberName(g, m.key)
+    if (m.key === model.me.key || !name || !name.toLowerCase().startsWith(q)) continue
+    out.push({ kind: 'member', key: m.key, label: name, insert: '@' + name })
+    if (out.length >= 8) break
+  }
+  return out
+}
+
+function MentionSuggest ({ g, items, index, onPick }) {
+  if (!items.length) return null
+  return html`
+    <div class="emoji-suggest mention-suggest">
+      <div class="es-head">Mention</div>
+      ${items.map((x, i) => html`
+        <button key=${x.insert} class=${i === index ? 'active' : ''} onMouseDown=${(e) => { e.preventDefault(); onPick(x) }}>
+          ${x.kind === 'claude' ? html`<${ClaudeAvatar} size=${22} />` : html`<${Avatar} name=${x.label} color=${model.memberColor(g, x.key)} src=${model.memberAvatar(g, x.key)} size=${22} />`}
+          <span class="ms-name">${x.label}</span>
+          ${x.hint && html`<small>${x.hint}</small>`}
+        </button>`)}
+    </div>`
+}
+
+// Shown above the composer while the message mentions @claude
+function ClaudeHint ({ g }) {
+  const why = claudeBlocked(g)
+  const model_ = MODEL_LABEL[model.settings.claude?.model] || 'Claude'
+  if (why === 'nokey') {
+    return html`<div class="claude-hint warn"><${Icon} name="sparkle" size=${14} /><span>Claude answers with your own Anthropic API key, and you haven't added one.</span><a onClick=${() => model.openModal('settings', { tab: 'claude' })}>Add a key</a></div>`
+  }
+  if (why === 'off') return html`<div class="claude-hint warn"><${Icon} name="sparkle" size=${14} /><span>An admin turned Claude off in this group.</span></div>`
+  return html`<div class="claude-hint"><${Icon} name="sparkle" size=${14} /><span>Claude (${model_}) will read the recent messages here and answer, using your API key.</span></div>`
+}
 
 function Composer ({ g, ch, handle, thread = null }) {
   const key = g.id + ':' + ch.id + (thread ? ':t:' + thread : '')
@@ -597,6 +682,11 @@ function Composer ({ g, ch, handle, thread = null }) {
   const send = async () => {
     const t = text.trim()
     if ((!t && !files.length) || busy) return
+    if (/^\/chess\b/i.test(t) && !files.length) {
+      setText('')
+      model.openModal('newGame', { gid: g.id, ch: ch.id })
+      return
+    }
     const data = { id: rid(), ch: ch.id, text: t }
     if (files.length) data.att = files.map(({ h, s, n, m, w, hh }) => ({ h, s, n, m, w, hh }))
     if (reply) data.re = reply.id
@@ -614,6 +704,10 @@ function Composer ({ g, ch, handle, thread = null }) {
     model.emit()
     requestAnimationFrame(() => ta.current && autosize(ta.current))
     if (t) attachPreviews(g.id, data.id, t)
+    if (mentionsClaude(t)) {
+      const m = g.msgById.get(data.id)
+      if (m) askClaude(g, m)
+    }
   }
 
   const setTextAndCaret = (next, caret) => {
@@ -634,13 +728,23 @@ function Composer ({ g, ch, handle, thread = null }) {
   }
   const applySuggest = (x) => {
     const caret = ta.current ? ta.current.selectionStart : text.length
-    const before = text.slice(0, caret).replace(SHORTCODE, (_, pre) => pre + x.e + ' ')
-    rememberEmoji(x.e)
+    let before
+    if (sugg.mode === 'mention') before = text.slice(0, caret).replace(MENTION, (_, pre) => pre + x.insert + ' ')
+    else {
+      before = text.slice(0, caret).replace(SHORTCODE, (_, pre) => pre + x.e + ' ')
+      rememberEmoji(x.e)
+    }
     setSugg({ items: [], index: 0 })
     setTextAndCaret(before + text.slice(caret), before.length)
   }
   const updateSuggest = (value, caret) => {
     const before = value.slice(0, caret)
+    const at = MENTION.exec(before)
+    if (at) {
+      const items = mentionItems(g, at[2])
+      setSugg(items.length ? { items, index: 0, mode: 'mention' } : { items: [], index: 0 })
+      return
+    }
     // ":thumbs_up:" typed out in full becomes the emoji right away
     const full = /:([\w+-]{2,40}):$/.exec(before)
     if (full) {
@@ -680,7 +784,7 @@ function Composer ({ g, ch, handle, thread = null }) {
     if (e.key === 'ArrowUp' && !text) {
       const list = thread ? model.threadOf(g, thread) : g.messages.get(ch.id) || []
       for (let i = list.length - 1; i >= 0; i--) {
-        if (list[i].a === model.me.key) { e.preventDefault(); model.ui.editing = list[i].id; model.emit(); break }
+        if (list[i].a === model.me.key && !list[i].bot && !list[i].game && !list[i].deleted) { e.preventDefault(); model.ui.editing = list[i].id; model.emit(); break }
       }
     }
   }
@@ -703,11 +807,14 @@ function Composer ({ g, ch, handle, thread = null }) {
 
   return html`
     <div class="composer-wrap ${thread ? 'in-thread' : ''}">
-      <${EmojiSuggest} items=${sugg.items} index=${sugg.index} onPick=${applySuggest} />
+      ${sugg.mode === 'mention'
+        ? html`<${MentionSuggest} g=${g} items=${sugg.items} index=${sugg.index} onPick=${applySuggest} />`
+        : html`<${EmojiSuggest} items=${sugg.items} index=${sugg.index} onPick=${applySuggest} />`}
+      ${mentionsClaude(text) && html`<${ClaudeHint} g=${g} />`}
       ${emojiOpen && html`<${EmojiPanel} class="for-composer" onPick=${insert} onClose=${() => setEmojiOpen(false)} />`}
       ${reply && html`
         <div class="reply-bar">
-          Replying to <b style=${{ color: model.memberColor(g, reply.a) }}>${model.memberName(g, reply.a)}</b>
+          Replying to <b class=${reply.bot ? 'claude-name' : ''} style=${reply.bot ? null : { color: model.memberColor(g, reply.a) }}>${reply.bot ? 'Claude' : model.memberName(g, reply.a)}</b>
           <button class="icon-btn small" onClick=${() => { model.ui.replyTo = null; model.emit() }}><${Icon} name="x" size=${16} /></button>
         </div>`}
       ${files.length > 0 && html`

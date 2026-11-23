@@ -89,7 +89,10 @@ const DEFAULT_SETTINGS = {
   screenVolumes: {}, // key -> volume of that friend's stream sound
   screenMutes: {}, // key -> true: their stream's sound is muted for you
   // Check GitHub for new versions and install them on restart
-  autoUpdate: true
+  autoUpdate: true,
+  // @claude: which model answers, and whether it may search the web (the API key itself is
+  // kept encrypted in claude.json, see claude.js)
+  claude: { model: 'claude-opus-5-5', web: false }
 }
 
 const COLORS = ['#2dd4bf', '#f472b6', '#fbbf24', '#60a5fa', '#a78bfa', '#f87171', '#4ade80', '#fb923c']

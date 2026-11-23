@@ -1,5 +1,7 @@
 import { html, useState, useEffect, useRef } from '../vendor/preact-htm.js'
-import { api, model, voice, act, append, rid, saveSettings, blobUrl, COLORS, fmtRate, fmtBytes, initials } from '../lib/core.js'
+import { api, model, voice, act, append, rid, saveSettings, blobUrl, COLORS, fmtRate, fmtBytes, initials, cleanErr } from '../lib/core.js'
+import { MAX_FOLDER_DEPTH } from '../lib/model.js'
+import { loadClaudeInfo } from '../lib/claude.js'
 import { SCREEN_PRESETS } from '../lib/voice.js'
 import { getMic, stopMic, noiseMode, isDenoised } from '../lib/denoise.js'
 import { extOf } from '../lib/highlight.js'
@@ -11,6 +13,8 @@ import { AvatarCropper, useImagePicker } from './avatar.js'
 import { restartForUpdate, updateStatusText } from './updates.js'
 import { EventModal, TaskModal } from './planner.js'
 import { addFriendByCode } from './friends.js'
+import { NewGameModal } from './games.js'
+import { folderOptions, folderFits } from './sidebar.js'
 
 export function Modal ({ title, children, wide = false, onClose = () => model.closeModal() }) {
   useEffect(() => {
@@ -43,7 +47,10 @@ export function Modals () {
     textFile: TextFileModal,
     event: EventModal,
     task: TaskModal,
-    openLink: OpenLinkModal
+    openLink: OpenLinkModal,
+    folder: FolderModal,
+    newGame: NewGameModal,
+    groupClaude: GroupClaudeModal
   }[m.name]
   return C ? html`<${C} ...${m.props} />` : null
 }
@@ -209,7 +216,7 @@ function InviteModal ({ gid, fresh }) {
     const op = await act(() => api.revokeInvite(gid, i.id))
     if (op) model.applyOps(gid, [op])
   }
-  const setAdminsOnly = (v) => act(() => append(gid, 'group.settings', { invites: v ? 'admins' : 'all' }))
+  const setAdminsOnly = (v) => act(() => append(gid, 'group.settings', model.settingsWith(g, { invites: v ? 'admins' : 'all' })))
   return html`
     <${Modal} title=${fresh ? 'Group created — invite your friends' : 'Invite people'}>
       <div class="modal-body">
@@ -263,18 +270,25 @@ function RenameGroupModal ({ gid }) {
     <//>`
 }
 
-function ChannelModal ({ gid, kind = 'text', chId = null }) {
+function ChannelModal ({ gid, kind = 'text', chId = null, folder: presetFolder = null }) {
   const g = model.groups.get(gid)
   const existing = chId ? g.channels.get(chId) : null
   const [k, setK] = useState(existing?.kind || kind)
   const [name, setName] = useState(existing?.name || '')
+  const was = existing ? model.channelFolder(g, chId)?.id || '' : ''
+  const [folder, setFolder] = useState(existing ? was : presetFolder || '')
+  const folders = folderOptions(g)
   const clean = k === 'text' ? name.trim().toLowerCase().replace(/\s+/g, '-').replace(/[^\p{L}\p{N}_-]/gu, '') : name.trim()
   const save = async () => {
     if (!clean) return
-    if (existing) await act(() => append(gid, 'channel.rename', { id: chId, name: clean }))
-    else {
+    if (existing) {
+      if (clean !== existing.name) await act(() => append(gid, 'channel.rename', { id: chId, name: clean }))
+      if (folder !== was) await act(() => append(gid, 'channel.move', { id: chId, folder: folder || null, order: Date.now() }))
+    } else {
       const id = rid()
-      const ok = await act(() => append(gid, 'channel.create', { id, name: clean, kind: k }))
+      const data = { id, name: clean, kind: k }
+      if (folder) data.folder = folder
+      const ok = await act(() => append(gid, 'channel.create', data))
       if (ok && k === 'text') model.selectChannel(gid, id)
     }
     model.closeModal()
@@ -295,12 +309,87 @@ function ChannelModal ({ gid, kind = 'text', chId = null }) {
             <button class=${k === 'voice' ? 'active' : ''} onClick=${() => setK('voice')}><${Icon} name="speaker" /><div><b>Voice</b><small>Talk, video, screen share</small></div></button>
           </div>`}
         <label>Channel name<input value=${name} maxLength="48" autoFocus placeholder=${k === 'text' ? 'new-channel' : 'Gaming'} onInput=${(e) => setName(e.target.value)} onKeyDown=${(e) => e.key === 'Enter' && save()} /></label>
+        ${(folders.length > 0 || folder) && html`
+          <label>Folder
+            <select value=${folder} onChange=${(e) => setFolder(e.target.value)}>
+              <option value="">No folder</option>
+              ${folders.map(o => html`<option value=${o.id}>${o.label}</option>`)}
+            </select>
+          </label>`}
       </div>
       <footer>
         ${existing && html`<button class="btn danger-ghost" onClick=${del}>Delete channel</button>`}
         <div class="spacer" />
         <button class="btn primary" disabled=${!clean} onClick=${save}>${existing ? 'Save' : 'Create'}</button>
       </footer>
+    <//>`
+}
+
+// A folder in the channel list: holds channels and other folders
+function FolderModal ({ gid, id = null, parent: presetParent = null }) {
+  const g = model.groups.get(gid)
+  const f = id ? g?.folders.get(id) : null
+  const was = f ? model.folderParent(g, f)?.id || '' : ''
+  const [name, setName] = useState(f?.name || '')
+  const [parent, setParent] = useState(f ? was : presetParent || '')
+  if (!g) return null
+  const options = folderOptions(g, { excluding: id }).filter(o => f ? folderFits(g, id, o.f) : model.folderDepth(g, o.f) + 1 < MAX_FOLDER_DEPTH)
+  const clean = name.trim()
+  const save = async () => {
+    if (!clean) return
+    if (!f) {
+      await act(() => append(gid, 'folder.create', { id: rid(), name: clean, parent: parent || null, order: Date.now() }))
+    } else {
+      const d = { id }
+      if (clean !== f.name) d.name = clean
+      if (parent !== was) { d.parent = parent || null; d.order = Date.now() }
+      if (Object.keys(d).length > 1) await act(() => append(gid, 'folder.set', d))
+    }
+    model.closeModal()
+  }
+  const del = () => {
+    const up = model.folderParent(g, f)
+    model.openModal('confirm', {
+      title: 'Delete folder',
+      body: `Delete the folder "${f.name}"? What's inside moves up to ${up ? '"' + up.name + '"' : 'the top level'}. No channel or message is deleted.`,
+      confirm: 'Delete folder',
+      danger: true,
+      onConfirm: () => act(() => append(gid, 'folder.delete', { id }))
+    })
+  }
+  return html`
+    <${Modal} title=${f ? 'Edit folder' : 'Create folder'}>
+      <div class="modal-body">
+        <label>Folder name<input value=${name} maxLength="48" autoFocus placeholder="Gaming" onInput=${(e) => setName(e.target.value)} onKeyDown=${(e) => e.key === 'Enter' && save()} /></label>
+        <label>Inside
+          <select value=${parent} onChange=${(e) => setParent(e.target.value)}>
+            <option value="">Top level</option>
+            ${options.map(o => html`<option value=${o.id}>${o.label}</option>`)}
+          </select>
+        </label>
+        <p class="hint">Folders can hold channels and other folders, up to ${MAX_FOLDER_DEPTH} levels. Drag channels and folders in the sidebar to sort them.</p>
+      </div>
+      <footer>
+        ${f && html`<button class="btn danger-ghost" onClick=${del}>Delete folder</button>`}
+        <div class="spacer" />
+        <button class="btn primary" disabled=${!clean} onClick=${save}>${f ? 'Save' : 'Create'}</button>
+      </footer>
+    <//>`
+}
+
+// Owner/admins: whether @claude works in this group at all
+function GroupClaudeModal ({ gid }) {
+  const g = model.groups.get(gid)
+  if (!g) return null
+  const on = model.groupSettings(g).claude !== 'off'
+  const set = (v) => act(() => append(gid, 'group.settings', model.settingsWith(g, { claude: v ? 'on' : 'off' })))
+  return html`
+    <${Modal} title=${'Claude in ' + model.groupName(g)}>
+      <div class="modal-body">
+        <p>Anyone here can write <b>@claude</b> to get an answer from Claude, an AI made by Anthropic. Whoever asks, their app sends the recent messages of that channel to Anthropic, with <b>their own</b> API key. Nobody else's key is used, and people without a key can't ask.</p>
+        <${Toggle} label="Allow @claude in this group" hint="When it's off, nobody's app sends messages from this group to Claude" checked=${on} onChange=${set} />
+      </div>
+      <footer><button class="btn" onClick=${() => model.closeModal()}>Done</button></footer>
     <//>`
 }
 
@@ -535,7 +624,7 @@ function MicMeter ({ audio }) {
 
 function SettingsModal ({ tab: initialTab = 'profile' }) {
   const [tab, setTab] = useState(initialTab)
-  const tabs = [['profile', 'My profile'], ['voice', 'Voice & audio'], ['screen', 'Screen share'], ['network', 'Network'], ['storage', 'Storage'], ['privacy', 'Privacy & security'], ['updates', 'Updates']]
+  const tabs = [['profile', 'My profile'], ['voice', 'Voice & audio'], ['screen', 'Screen share'], ['claude', 'Claude'], ['network', 'Network'], ['storage', 'Storage'], ['privacy', 'Privacy & security'], ['updates', 'Updates']]
   return html`
     <${Modal} title="Settings" wide>
       <div class="settings">
@@ -544,6 +633,7 @@ function SettingsModal ({ tab: initialTab = 'profile' }) {
           ${tab === 'profile' && html`<${ProfileSettings} />`}
           ${tab === 'voice' && html`<${VoiceSettings} />`}
           ${tab === 'screen' && html`<${ScreenSettings} />`}
+          ${tab === 'claude' && html`<${ClaudeSettings} />`}
           ${tab === 'network' && html`<${NetworkSettings} />`}
           ${tab === 'storage' && html`<${StorageSettings} />`}
           ${tab === 'privacy' && html`<${PrivacySettings} />`}
@@ -828,6 +918,66 @@ function UpdateSettings () {
     ${u?.portable && html`<p class="hint">You're running the portable .exe. The first update installs OpenDiscord on this PC (per user, no admin needed). After that, start it from the Start menu or desktop. Your groups and messages carry over.</p>`}`
 }
 
+const CLAUDE_MODELS = [
+  ['claude-opus-5-5', 'Opus 5.5', 'smartest, about 2¢ an answer'],
+  ['claude-sonnet-5-5', 'Sonnet 5.5', 'balanced, about 1¢ an answer'],
+  ['claude-haiku-5-5', 'Haiku 5.5', 'fastest, a fraction of a cent']
+]
+
+function ClaudeSettings () {
+  const info = model.claude || {}
+  const [key, setKey] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState('')
+  const s = model.settings.claude || {}
+  useEffect(() => { loadClaudeInfo() }, [])
+  const keychain = model.platform === 'win32' ? 'encrypted by Windows' : model.platform === 'darwin' ? 'in the macOS keychain' : 'encrypted by your keyring'
+  const save = async () => {
+    setBusy(true)
+    setErr('')
+    try {
+      model.claude = await api.claudeSetKey(key.trim())
+      setKey('')
+      model.toast('API key saved. Write @claude in any chat to ask.')
+    } catch (e) { setErr(cleanErr(e)) }
+    setBusy(false)
+    model.emit()
+  }
+  const remove = () => model.openModal('confirm', {
+    title: 'Remove API key',
+    body: 'Remove your Anthropic API key from this PC? @claude stops working for you until you add one again.',
+    confirm: 'Remove key',
+    danger: true,
+    onConfirm: async () => { model.claude = await api.claudeClearKey(); model.emit() }
+  })
+  const setS = (patch) => saveSettings({ claude: { ...s, ...patch } })
+  return html`
+    <h4>Ask Claude in your chats</h4>
+    <p class="hint">Write <b>@claude</b> in any chat or thread and Claude, an AI made by Anthropic, answers there for everyone to see. Your app sends the recent messages of that chat (and pictures or text files in your message) to Anthropic and posts the answer. It uses <b>your own API key</b>: friends without a key can't ask Claude, and your key is never sent to them.</p>
+    <h4>Your API key</h4>
+    ${info.hasKey
+      ? html`
+        <div class="key-row">
+          <${Icon} name="lock" size=${16} />
+          <span>Key ending in <b class="mono">${info.hint}</b> is saved ${info.encrypted ? keychain : 'in a file only you can read'}.</span>
+          <button class="btn sm danger-ghost" onClick=${remove}>Remove</button>
+        </div>`
+      : html`
+        <div class="row">
+          <input class="grow mono" type="password" placeholder="sk-ant-…" value=${key} onInput=${(e) => setKey(e.target.value)} onKeyDown=${(e) => e.key === 'Enter' && key.trim() && save()} />
+          <button class="btn primary" disabled=${!key.trim() || busy} onClick=${save}>${busy ? 'Checking…' : 'Save key'}</button>
+        </div>
+        ${err && html`<p class="error-text">${err}</p>`}
+        <p class="hint">Create a key at <a onClick=${() => api.openExternal('https://console.anthropic.com/settings/keys')}>console.anthropic.com</a>. Anthropic bills you for each answer; the key is checked once and then stays on this PC.</p>`}
+    <h4>Model</h4>
+    <div class="model-pick">
+      ${CLAUDE_MODELS.map(([id, label, hint]) => html`
+        <button key=${id} class=${(s.model || 'claude-opus-5-5') === id ? 'active' : ''} onClick=${() => setS({ model: id })}><b>${label}</b><small>${hint}</small></button>`)}
+    </div>
+    <${Toggle} label="Let Claude search the web" hint="For news, prices, opening hours and the like. Anthropic bills each search on top." checked=${!!s.web} onChange=${(v) => setS({ web: v })} />
+    ${info.usage && info.usage.answers > 0 && html`<p class="hint">This month: ${info.usage.answers} answer${info.usage.answers === 1 ? '' : 's'}, about $${info.usage.usd < 0.01 ? '0.01' : info.usage.usd.toFixed(2)}${info.usage.searches ? ` plus ${info.usage.searches} web search${info.usage.searches === 1 ? '' : 'es'}` : ''}.</p>`}`
+}
+
 function PrivacySettings () {
   const key = model.me.key
   return html`
@@ -837,6 +987,8 @@ function PrivacySettings () {
       <li><${Icon} name="lock" size=${18} /><div><b>Messages & files</b><small>Sent over Noise-encrypted Hyperswarm connections (X25519 + ChaCha20-Poly1305). Each friend must prove they know the group secret, bound to the session's handshake hash, before receiving anything.</small></div></li>
       <li><${Icon} name="shield" size=${18} /><div><b>Authenticity</b><small>Every message, edit and reaction is signed with the author's Ed25519 key, so nobody can forge or alter them while relaying.</small></div></li>
       <li><${Icon} name="speaker" size=${18} /><div><b>Calls & screen share</b><small>WebRTC DTLS-SRTP, directly between you. The DTLS fingerprints are exchanged over the authenticated channel, so no one can man-in-the-middle a call.</small></div></li>
+      <li><${Icon} name="micOff" size=${18} /><div><b>Nobody listens in</b><small>Your microphone only opens when you join a voice channel. While you're muted it's taken off every connection, so no sound leaves your PC, whatever the other side's app does. Your app only connects to people who are listed in the channel, and your screen only goes to people who appear as watching it.</small></div></li>
+      <li><${Icon} name="sparkle" size=${18} /><div><b>Claude</b><small>Only when someone writes @claude does their app send the recent messages of that chat to Anthropic, with their own API key. Admins can turn this off per group.</small></div></li>
       <li><${Icon} name="file" size=${18} /><div><b>On disk</b><small>History is stored unencrypted in your user profile folder, like most desktop apps. Protect your device with disk encryption (BitLocker/FileVault).</small></div></li>
     </ul>
     <h4>Link previews</h4>

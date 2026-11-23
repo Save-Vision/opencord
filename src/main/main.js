@@ -1,7 +1,7 @@
 'use strict'
 const {
   app, BrowserWindow, ipcMain, protocol, session, desktopCapturer, shell, dialog,
-  Tray, Menu, nativeImage, clipboard, globalShortcut
+  Tray, Menu, nativeImage, clipboard, globalShortcut, safeStorage
 } = require('electron')
 const path = require('path')
 const fs = require('fs')
@@ -11,6 +11,7 @@ const { Network, importBlobFile, importBlobBuffer } = require('./network')
 const { Updater } = require('./updater')
 const datadir = require('./datadir')
 const { linkPreview } = require('./linkpreview')
+const { Claude } = require('./claude')
 const c = require('./crypto')
 
 // --profile=name runs an isolated instance (own identity + data). Handy for testing
@@ -63,6 +64,7 @@ let tray = null
 let store = null
 let net = null
 let updater = null
+let claude = null
 let quitting = false
 let pendingScreen = null
 
@@ -117,6 +119,7 @@ function send (channel, ...args) {
 async function boot () {
   app.setAppUserModelId('app.opendiscord' + (profile ? '.' + profile : ''))
   store = new Store(await openDataDir()).load()
+  claude = new Claude({ dir: store.dir, safeStorage, store })
   net = new Network(store, {
     bootstrap: process.env.OD_BOOTSTRAP ? process.env.OD_BOOTSTRAP.split(',') : undefined,
     appVersion: app.getVersion()
@@ -566,6 +569,30 @@ function registerIpc () {
     return true
   })
   handle('storage:open', () => shell.openPath(store.dir))
+
+  // @claude with the user's own API key (see claude.js). The key goes in once and never
+  // comes back out to the UI.
+  handle('claude:info', () => claude.info())
+  handle('claude:set-key', (key) => claude.setKey(key))
+  handle('claude:clear-key', () => claude.clearKey())
+  handle('claude:ask', async (id, req) => {
+    const rid = String(id)
+    let last = 0
+    let timer = null
+    let pending = null
+    // at most ~8 updates a second to the UI (it relays them to friends)
+    const flush = () => { timer = null; if (pending) { send('claude-update', rid, pending.text, pending.status); pending = null } }
+    try {
+      return await claude.ask(rid, req || {}, (text, status) => {
+        pending = { text, status }
+        const now = Date.now()
+        if (status || now - last > 120) { last = now; flush() } else if (!timer) timer = setTimeout(flush, 120)
+      })
+    } finally {
+      clearTimeout(timer)
+    }
+  })
+  handle('claude:cancel', (id) => { claude.cancel(String(id)); return true })
 
   handle('shell:open', (url) => { if (/^https?:\/\//i.test(url)) shell.openExternal(url) })
   handle('clipboard:write', (text) => { clipboard.writeText(String(text)); return true })

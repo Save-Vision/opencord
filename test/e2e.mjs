@@ -2,12 +2,15 @@
 // Covers onboarding, one-time group invite links, chat sync, threads, emoji, pins, file and link
 // previews, a P2P image transfer, profile and group pictures, the shared calendar and task board,
 // roles, a voice call with mute/move, opt-in screen watching with viewers and zoom, friend links
-// with a private chat and call, and a kick.
+// with a private chat and call, and a kick. Since 0.5: channel folders, a chess game, @claude
+// against a stand-in for the Anthropic API, and checks that a muted mic sends nothing and that
+// forged voice messages can't open a call.
 // Screenshots land in test/screenshots/.
 // Run: npm run test:e2e
 import { _electron as electron } from 'playwright-core'
 import { createRequire } from 'module'
 import fs from 'fs'
+import http from 'http'
 import os from 'os'
 import path from 'path'
 import { fileURLToPath } from 'url'
@@ -24,6 +27,42 @@ const bootstrap = testnet.bootstrap.map(b => `${b.host}:${b.port}`).join(',')
 const apps = []
 let failed = false
 
+// A stand-in for the Anthropic API on this PC, so @claude is tested without a real key or cost
+const TEST_KEY = 'sk-ant-test-' + 'k'.repeat(28)
+const claudeLog = []
+const claudeMock = http.createServer((req, res) => {
+  let body = ''
+  req.on('data', (c) => { body += c })
+  req.on('end', async () => {
+    // SDK 1.x sends the key as a bearer token; older ones used x-api-key
+    const key = req.headers['x-api-key'] || (req.headers.authorization || '').replace(/^Bearer /, '')
+    claudeLog.push({ method: req.method, path: req.url, key, body })
+    const json = (code, obj) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(obj)) }
+    if (key !== TEST_KEY) return json(401, { type: 'error', error: { type: 'authentication_error', message: 'invalid x-api-key' } })
+    if (req.method === 'GET' && req.url.startsWith('/v1/models')) {
+      return json(200, { data: [{ type: 'model', id: 'claude-opus-5-5', display_name: 'Claude Opus 5.5', created_at: '2026-01-01T00:00:00Z' }], has_more: false, first_id: 'claude-opus-5-5', last_id: 'claude-opus-5-5' })
+    }
+    if (req.method === 'POST' && req.url.startsWith('/v1/messages')) {
+      const r = JSON.parse(body)
+      res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' })
+      const ev = (type, data = {}) => res.write(`event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`)
+      ev('message_start', { message: { id: 'msg_test', type: 'message', role: 'assistant', model: r.model, content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 420, output_tokens: 1 } } })
+      ev('content_block_start', { index: 0, content_block: { type: 'text', text: '' } })
+      for (const w of ['**P2P** means ', 'peer-to-peer: ', 'your PCs talk ', 'to each other directly, ', 'with no server in between.']) {
+        await new Promise(resolve => setTimeout(resolve, 400))
+        ev('content_block_delta', { index: 0, delta: { type: 'text_delta', text: w } })
+      }
+      ev('content_block_stop', { index: 0 })
+      ev('message_delta', { delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { output_tokens: 24 } })
+      ev('message_stop')
+      return res.end()
+    }
+    json(404, { type: 'error', error: { type: 'not_found_error', message: 'Not found' } })
+  })
+})
+await new Promise(resolve => claudeMock.listen(0, '127.0.0.1', resolve))
+const claudeURL = `http://127.0.0.1:${claudeMock.address().port}`
+
 async function launch (name) {
   const app = await electron.launch({
     // OD_EXE=dist/win-unpacked/OpenDiscord.exe tests the packaged build instead of the sources
@@ -31,17 +70,19 @@ async function launch (name) {
     // REAL_CAPTURE=1 uses your real screen/mic instead of Chromium's synthetic test devices
     args: [...(process.env.OD_EXE ? [] : ['.']), `--profile=${name}`, ...(process.env.REAL_CAPTURE ? [] : ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream'])],
     cwd: root,
-    env: { ...process.env, OD_DATA_DIR: path.join(tmp, name), OD_BOOTSTRAP: bootstrap }
+    env: { ...process.env, OD_DATA_DIR: path.join(tmp, name), OD_BOOTSTRAP: bootstrap, OD_CLAUDE_BASE_URL: claudeURL }
   })
   apps.push(app)
   const page = await app.firstWindow()
-  page.on('pageerror', (e) => console.log(`[${name} pageerror]`, e.message))
+  page.on('pageerror', (e) => console.log(`[${name} pageerror]`, (e.stack || e.message).split('\n').slice(0, 4).join(' | ')))
   page.on('console', (m) => { if (m.type() === 'error' || m.type() === 'warning') console.log(`[${name} ${m.type()}]`, m.text()) })
   await page.setViewportSize({ width: 1320, height: 820 }).catch(() => {})
   return page
 }
 
 const step = (s) => console.log('▶', s)
+// A text channel's row also holds its unread badge, so find it by its name
+const openChannel = (page, name) => page.locator('.channel .ch-name').getByText(name, { exact: true }).click()
 const shot = (page, name) => page.screenshot({ path: path.join(shots, name + '.png') })
 
 try {
@@ -270,6 +311,107 @@ try {
   await alice.getByRole('button', { name: 'general', exact: true }).click()
   await bob.getByRole('button', { name: 'general', exact: true }).click()
 
+  step('folders: create one, put channels in, both see the same tree')
+  await alice.locator('.group-header').click()
+  await alice.locator('.dropdown button', { hasText: 'Create folder' }).click()
+  await alice.locator('.modal input').fill('Gaming')
+  await alice.locator('.modal footer').getByRole('button', { name: 'Create' }).click()
+  const aFolder = alice.locator('.folder', { has: alice.locator('.folder-head', { hasText: 'Gaming' }) })
+  await aFolder.waitFor({ timeout: 5000 })
+  await aFolder.locator('.folder-head').hover()
+  await aFolder.locator('button[title="Create channel in this folder"]').click()
+  await alice.locator('.modal input').first().fill('minecraft')
+  await alice.locator('.modal footer').getByRole('button', { name: 'Create' }).click()
+  await aFolder.locator('.channel', { hasText: 'minecraft' }).waitFor({ timeout: 5000 })
+  await alice.getByRole('button', { name: 'General', exact: true }).dragTo(aFolder.locator('.folder-head'))
+  const bFolder = bob.locator('.folder', { has: bob.locator('.folder-head', { hasText: 'Gaming' }) })
+  await bFolder.locator('.channel', { hasText: 'minecraft' }).waitFor({ timeout: 10000 })
+  await bFolder.getByRole('button', { name: 'General', exact: true }).waitFor({ timeout: 10000 })
+  await shot(bob, '30-folders')
+  await bFolder.locator('.folder-name').click()
+  await bFolder.locator('.channel', { hasText: 'minecraft' }).waitFor({ state: 'detached', timeout: 5000 })
+  await bFolder.locator('.folder-name').click()
+  await bFolder.locator('.channel', { hasText: 'minecraft' }).waitFor({ timeout: 5000 })
+  await openChannel(alice, 'general')
+
+  step('chess: challenge, accept, play, agree a draw')
+  await alice.locator('.chat-header button[title="Play chess in this channel"]').click()
+  await alice.locator('.modal select').first().selectOption({ label: 'Bob' })
+  await shot(alice, '31-new-game')
+  await alice.getByRole('button', { name: 'Send challenge' }).click()
+  await alice.locator('.chess-board').waitFor({ timeout: 5000 })
+  await bob.locator('.game-card').getByRole('button', { name: 'Accept' }).click({ timeout: 15000 })
+  await bob.locator('.chess-board').waitFor({ timeout: 5000 })
+  await alice.locator('.game-status', { hasText: 'Your move' }).waitFor({ timeout: 10000 })
+  await alice.locator('[data-sq="e2"]').click()
+  await alice.locator('[data-sq="e4"]').click()
+  await bob.locator('.mv', { hasText: 'e4' }).waitFor({ timeout: 10000 })
+  await bob.locator('[data-sq="e7"]').click()
+  await bob.locator('[data-sq="e5"]').click()
+  await alice.locator('.mv', { hasText: 'e5' }).waitFor({ timeout: 10000 })
+  await alice.locator('[data-sq="g1"]').dragTo(alice.locator('[data-sq="f3"]'))
+  await bob.locator('.mv', { hasText: 'Nf3' }).waitFor({ timeout: 10000 })
+  await bob.locator('[data-sq="e8"]').click() // the king can't go to e6: nothing happens
+  await bob.locator('[data-sq="e6"]').click()
+  await bob.waitForTimeout(500)
+  if (await bob.locator('.mv').count() !== 3) throw new Error('an illegal move was played')
+  await bob.locator('[data-sq="b8"]').click()
+  await bob.locator('[data-sq="c6"]').click()
+  await alice.locator('.mv', { hasText: 'Nc6' }).waitFor({ timeout: 10000 })
+  await shot(alice, '32-chess')
+  await bob.getByRole('button', { name: 'Offer draw' }).click()
+  await alice.locator('.draw-offer').getByRole('button', { name: 'Accept' }).click({ timeout: 10000 })
+  await bob.getByText('Draw by agreement').first().waitFor({ timeout: 10000 })
+  await openChannel(alice, 'general')
+  await openChannel(bob, 'general')
+  await bob.locator('.game-card .gc-status', { hasText: 'Draw by agreement' }).waitFor({ timeout: 5000 })
+
+  step('@claude: only people with their own API key can ask')
+  await bob.locator('.composer textarea').fill('@claude are you there?')
+  await bob.locator('.claude-hint.warn', { hasText: "haven't added one" }).waitFor({ timeout: 5000 })
+  await bob.keyboard.press('Enter')
+  await bob.locator('.toast', { hasText: 'add your own Anthropic API key' }).waitFor({ timeout: 5000 })
+  await alice.locator('.msg .text', { hasText: '@claude are you there?' }).waitFor({ timeout: 10000 })
+  if (claudeLog.length) throw new Error('something called the API without a key')
+  await alice.locator('.composer textarea').fill('@claude what does p2p mean?')
+  await alice.locator('.claude-hint.warn a', { hasText: 'Add a key' }).click()
+  await alice.locator('.settings-body input[type="password"]').fill('sk-ant-wrong-' + 'w'.repeat(28))
+  await alice.getByRole('button', { name: 'Save key' }).click()
+  await alice.locator('.error-text').waitFor({ timeout: 15000 })
+  console.log('   a wrong key is refused:', (await alice.locator('.error-text').textContent()).trim())
+  await alice.locator('.settings-body input[type="password"]').fill(TEST_KEY)
+  await alice.getByRole('button', { name: 'Save key' }).click()
+  await alice.locator('.key-row', { hasText: TEST_KEY.slice(-4) }).waitFor({ timeout: 15000 })
+  await shot(alice, '33-claude-settings')
+  const info = await alice.evaluate(() => window.__od.model.claude)
+  if (JSON.stringify(info).includes(TEST_KEY)) throw new Error('the API key reached the window')
+  const keyFile = fs.readFileSync(path.join(tmp, 'alice', 'claude.json'), 'utf8')
+  if (info.encrypted && keyFile.includes(TEST_KEY)) throw new Error('the API key is stored in plain text')
+  console.log('   key stored encrypted:', info.encrypted)
+  await alice.keyboard.press('Escape')
+  await alice.locator('.claude-hint:not(.warn)').waitFor({ timeout: 5000 })
+  await alice.locator('.composer textarea').press('Enter')
+  await bob.locator('.msg.draft').waitFor({ timeout: 10000 }) // bob watches the answer being written
+  await shot(bob, '34-claude-writing')
+  const answer = bob.locator('.msg.bot:not(.draft)', { hasText: 'peer-to-peer' })
+  await answer.waitFor({ timeout: 20000 })
+  await answer.locator('.asked-by', { hasText: 'Alice' }).waitFor()
+  await bob.locator('.msg.draft').waitFor({ state: 'detached', timeout: 5000 })
+  await alice.locator('.msg.bot:not(.draft)', { hasText: 'peer-to-peer' }).waitFor({ timeout: 5000 })
+  const asks = claudeLog.filter(r => r.path.startsWith('/v1/messages'))
+  if (asks.length !== 1) throw new Error(`expected 1 request to Claude, got ${asks.length}`)
+  if (!asks[0].body.includes('what does p2p mean') || !asks[0].body.includes('are you there')) throw new Error('the chat did not reach Claude')
+  await shot(alice, '35-claude-answer')
+  // an admin turns @claude off for the whole group
+  await alice.locator('.group-header').click()
+  await alice.locator('.dropdown button', { hasText: 'Claude settings' }).click()
+  await alice.locator('.modal .toggle-row').click()
+  await alice.locator('.modal footer').getByRole('button', { name: 'Done' }).click()
+  await bob.waitForFunction(() => { const m = window.__od.model; return !m.claudeAllowed(m.groupsList().find(x => !x.dm)) }, null, { timeout: 10000 })
+  await alice.locator('.composer textarea').fill('@claude still there?')
+  await alice.locator('.claude-hint.warn', { hasText: 'turned Claude off' }).waitFor({ timeout: 5000 })
+  await alice.locator('.composer textarea').fill('')
+
   step('owner makes bob an admin')
   await alice.locator('.member', { hasText: 'Bob' }).click({ button: 'right' })
   await alice.locator('.ctx-menu').waitFor()
@@ -294,6 +436,26 @@ try {
   console.log('   alice sees bob:', (await alice.locator('.tile-conn').textContent()).trim())
   console.log('   bob sees alice:', (await bob.locator('.tile-conn').textContent()).trim())
   console.log('   AI noise suppression active:', await alice.evaluate(() => window.__od.voice.denoised), '/', await bob.evaluate(() => window.__od.voice.denoised))
+
+  step('muted: not a single audio packet leaves the PC')
+  const sendsAudio = (page) => page.evaluate(() => [...window.__od.voice.calls.values()].some(c => c.pc.getSenders().some(s => s.track?.kind === 'audio')))
+  const audioIn = (page) => page.evaluate(async () => {
+    let n = 0
+    for (const c of window.__od.voice.calls.values()) (await c.pc.getStats()).forEach(r => { if (r.type === 'inbound-rtp' && r.kind === 'audio') n += r.bytesReceived || 0 })
+    return n
+  })
+  const audioOver = async (ms) => { const a = await audioIn(bob); await bob.waitForTimeout(ms); return (await audioIn(bob)) - a }
+  if (!(await sendsAudio(alice))) throw new Error('alice sends no audio while unmuted')
+  if (await audioOver(1500) <= 0) throw new Error('bob hears nothing from alice while she is unmuted')
+  await alice.evaluate(() => window.__od.voice.toggleMute())
+  await alice.waitForTimeout(800)
+  if (await sendsAudio(alice)) throw new Error('alice still sends her mic while muted')
+  const leaked = await audioOver(2500)
+  console.log(`   audio bytes bob got from muted alice in 2.5 s: ${leaked}`)
+  if (leaked > 0) throw new Error('audio still arrives from a muted mic')
+  await alice.evaluate(() => window.__od.voice.toggleMute())
+  await alice.waitForTimeout(500)
+  if (await audioOver(1500) <= 0) throw new Error('audio did not come back after unmuting')
 
   step('screen share at 1080p60' + (process.env.CODEC ? ' with ' + process.env.CODEC : ''))
   if (process.env.CODEC) {
@@ -373,6 +535,39 @@ try {
   step('leave call')
   await alice.locator('.call-controls .hangup').click()
   await bob.evaluate(() => window.__od.voice.leave())
+
+  step('forged voice messages from a member can\'t open a call')
+  const aliceKey = await alice.evaluate(() => window.__od.model.me.key)
+  const voiceOf = (page) => page.evaluate(() => ({ active: window.__od.voice.active?.ch || null, calls: window.__od.voice.calls.size, mic: !!window.__od.voice.local.mic }))
+  // alice isn't in any voice channel: bob claims to be in one with her and sends her an offer
+  await bob.evaluate((alice) => {
+    const m = window.__od.model
+    const g = m.groupsList().find(x => !x.dm)
+    const vc = m.orderedChannels(g, 'voice')[0].id
+    window.od.sendEph(g.id, alice, { type: 'voice', ch: vc, sid: 'evil-1', muted: false, watch: [alice] })
+    window.od.sendEph(g.id, alice, { type: 'rtc', from: 'evil-1', to: 'evil-guess', sdp: { type: 'offer', sdp: 'v=0\r\n' } })
+  }, aliceKey)
+  await alice.waitForTimeout(1500)
+  let v = await voiceOf(alice)
+  if (v.active || v.calls || v.mic) throw new Error('a forged voice state opened something: ' + JSON.stringify(v))
+  // alice sits in Lounge alone: bob, who isn't, sends an offer to her session and asks to watch
+  await alice.getByRole('button', { name: 'Lounge', exact: true }).click()
+  await alice.waitForFunction(() => window.__od.voice.active?.ch === 'lounge1', null, { timeout: 10000 })
+  await bob.waitForFunction((alice) => window.__od.model.groupsList().find(x => !x.dm).voice.get(alice)?.ch === 'lounge1', aliceKey, { timeout: 10000 })
+  await bob.evaluate((alice) => {
+    const m = window.__od.model
+    const g = m.groupsList().find(x => !x.dm)
+    const sid = g.voice.get(alice).sid
+    const other = m.orderedChannels(g, 'voice').find(c => c.id !== 'lounge1').id
+    window.od.sendEph(g.id, alice, { type: 'voice', ch: other, sid: 'evil-2', muted: false, watch: [alice] })
+    window.od.sendEph(g.id, alice, { type: 'rtc', from: 'evil-2', to: sid, sdp: { type: 'offer', sdp: 'v=0\r\n' } })
+  }, aliceKey)
+  await alice.waitForTimeout(1500)
+  v = await voiceOf(alice)
+  if (v.calls) throw new Error('someone outside the channel got a connection')
+  console.log('   forged states and offers ignored:', JSON.stringify(v))
+  await alice.evaluate(() => window.__od.voice.leave())
+  await bob.evaluate(() => window.od.sendEph(window.__od.model.groupsList().find(x => !x.dm).id, null, { type: 'voice', ch: null }))
 
   step('friends: one-time friend link, private chat')
   await alice.locator('.rail-btn.home').click()
@@ -460,6 +655,7 @@ try {
 } finally {
   for (const app of apps) await app.close().catch(() => {})
   await testnet.destroy()
+  claudeMock.close()
   fs.rmSync(tmp, { recursive: true, force: true })
   process.exit(failed ? 1 : 0)
 }

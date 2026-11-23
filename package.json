@@ -1,7 +1,7 @@
 {
   "name": "opendiscord",
   "productName": "OpenDiscord",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Serverless, end-to-end encrypted P2P chat, voice and screen sharing for a small group of friends",
   "main": "src/main/main.js",
   "private": true,
@@ -10,7 +10,7 @@
     "start": "electron .",
     "dev:alice": "electron . --profile=alice",
     "dev:bob": "electron . --profile=bob",
-    "test": "node --test test/core.test.js",
+    "test": "node --test test/core.test.js test/logic.test.mjs",
     "test:e2e": "node test/e2e.mjs",
     "icon": "node scripts/make-icon.js",
     "dist": "electron-builder --win --publish never",
@@ -20,6 +20,7 @@
     "next-version": "node scripts/next-version.js"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^1.12.0",
     "@shiguredo/rnnoise-wasm": "^2025.1.5",
     "b4a": "^1.9.0",
     "electron-updater": "^6.8.11",

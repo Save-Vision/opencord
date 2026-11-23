@@ -1,8 +1,17 @@
 // Derived application state. Every peer replays the same set of signed ops in a
 // deterministic way, so everyone converges on identical channels/messages/profiles.
 
+import { cleanGameInfo, deriveChess } from './games.js'
+
 const MAX_TEXT = 4000
 const later = (t1, a1, t2, a2) => t1 > t2 || (t1 === t2 && a1 > a2)
+// Field-by-field "newest edit wins" (events, tasks, folders, where a channel sits)
+function setFields (x, fields, op) {
+  for (const [f, v] of Object.entries(fields)) {
+    const ts = x.ts[f]
+    if (!ts || later(op.t, op.a, ts[0], ts[1])) { x[f] = v; x.ts[f] = [op.t, op.a] }
+  }
+}
 const str = (v, max) => (typeof v === 'string' ? v.slice(0, max) : '')
 // Same rule as the main process (store.js): a small raster image as a data URL.
 export const isAvatarUrl = (s) => typeof s === 'string' && s.length <= 48 * 1024 && /^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/]+={0,2}$/.test(s)
@@ -83,6 +92,27 @@ function taskFields (d) {
   return o
 }
 
+// ---- folders ----
+// Folders hold channels and other folders (up to MAX_FOLDER_DEPTH deep). Where a channel or
+// folder sits (folder + order) is its own last-writer-wins field, so moving things around never
+// touches the channel itself, and 0.4 apps simply keep showing a flat list.
+export const MAX_FOLDER_DEPTH = 3
+
+function folderFields (d) {
+  const o = {}
+  if ('name' in d) { const n = str(d.name, 48).trim(); if (n) o.name = n }
+  if ('parent' in d) o.parent = str(d.parent, 32) || null
+  if ('order' in d && Number.isFinite(d.order)) o.order = d.order
+  return o
+}
+
+function placeFields (d) {
+  const o = {}
+  if ('folder' in d) o.folder = str(d.folder, 32) || null
+  if ('order' in d && Number.isFinite(d.order)) o.order = d.order
+  return o
+}
+
 const newEvent = (id) => ({ id, title: '', desc: '', loc: '', day: null, allDay: false, dur: 60, start: null, remind: 15, createdAt: Infinity, createdBy: null, ts: {}, rsvp: new Map(), deleted: false })
 const newTask = (id) => ({ id, title: '', desc: '', status: 'todo', assignee: null, due: null, order: null, checklist: [], createdAt: Infinity, createdBy: null, ts: {}, deleted: false })
 
@@ -122,6 +152,11 @@ function newGroup ({ id, nameHint, joinedAt, dm, membership }) {
     tasks: new Map(),
     invites: new Map(), // id -> { id, exp, by, t, used, revoked }
     settingsOps: [], // group.settings ops (who may change them is checked when read)
+    folders: new Map(), // id -> { id, name, parent, order, ... }
+    placement: new Map(), // channel id -> { folder, order, ts }
+    treeV: 0, // bumped when channels or folders change (the sidebar tree is cached on it)
+    games: new Map(), // msg id -> { info, by, ops, v }
+    claudeDrafts: new Map(), // msg id -> an answer Claude is still writing (live, not stored)
     owner: null,
     admins: new Set(),
     removed: new Set(),
@@ -154,7 +189,8 @@ export class Model {
       replyTo: null,
       editing: null,
       thread: null, // { gid, id } open thread panel
-      planner: null // { gid, tab: 'calendar' | 'tasks' }
+      planner: null, // { gid, tab: 'calendar' | 'tasks' }
+      games: null // { gid, id }: the games list (id null) or one board
     }
     this._scheduled = false
     try { Object.assign(this.ui.chByGroup, JSON.parse(localStorage.getItem('od.chByGroup') || '{}')) } catch {}
@@ -233,13 +269,24 @@ export class Model {
 
   // ---- group settings & invites (same rules as main/store.js) ----
 
+  // Each setting: the newest value set by the owner or an admin
   groupSettings (g) {
-    let best = null
+    const best = {}
     for (const op of g.settingsOps) {
-      if (this.isMod(g, op.a) && (!best || later(op.t, op.a, best.t, best.a))) best = op
+      if (!this.isMod(g, op.a)) continue
+      for (const f of Object.keys(op.d)) if (!best[f] || later(op.t, op.a, best[f].t, best[f].a)) best[f] = op
     }
-    return { invites: best?.d.invites === 'admins' ? 'admins' : 'all' }
+    return {
+      invites: best.invites?.d.invites === 'admins' ? 'admins' : 'all',
+      claude: best.claude?.d.claude === 'off' ? 'off' : 'on'
+    }
   }
+
+  // A group.settings op always carries every setting, so apps that only know some of them
+  // (0.4 reads the whole op as "the invite setting") still agree.
+  settingsWith (g, patch) { return { ...this.groupSettings(g), ...patch } }
+
+  claudeAllowed (g) { return !!g && (g.dm || this.groupSettings(g).claude !== 'off') }
 
   canInvite (g) {
     return !!g && !g.dm && !g.kickedMe && (this.groupSettings(g).invites !== 'admins' || this.isMod(g, this.me.key))
@@ -321,6 +368,7 @@ export class Model {
 
   openPlanner (gid, tab) {
     this.ui.planner = { gid, tab }
+    this.ui.games = null
     this.ui.stage = null
     this.ui.thread = null
     this.selectGroup(gid)
@@ -382,9 +430,60 @@ export class Model {
     if (op.k === 'x') return // a stub: the op it replaced is no longer needed (see store.js)
     this._member(g, op.a, op.t)
     switch (op.k) {
-      case 'group.settings':
-        if (d.invites === 'admins' || d.invites === 'all') g.settingsOps.push({ a: op.a, t: op.t, d: { invites: d.invites } })
+      case 'group.settings': {
+        const s = {}
+        if (d.invites === 'admins' || d.invites === 'all') s.invites = d.invites
+        if (d.claude === 'on' || d.claude === 'off') s.claude = d.claude
+        if (Object.keys(s).length) g.settingsOps.push({ a: op.a, t: op.t, d: s })
         break
+      }
+      case 'folder.create':
+      case 'folder.set': {
+        const id = str(d.id, 32)
+        if (!id || g.dm) break
+        let f = g.folders.get(id)
+        if (!f) { f = { id, name: 'Folder', parent: null, order: null, createdAt: Infinity, createdBy: null, ts: {}, deleted: false }; g.folders.set(id, f) }
+        if (op.k === 'folder.create' && op.t < f.createdAt) { f.createdAt = op.t; f.createdBy = op.a }
+        setFields(f, folderFields(d), op)
+        g.treeV++
+        break
+      }
+      case 'folder.delete': {
+        const id = str(d.id, 32)
+        if (!id || g.dm) break
+        if (!g.folders.has(id)) g.folders.set(id, { id, name: 'Folder', parent: null, order: null, createdAt: Infinity, createdBy: null, ts: {}, deleted: false })
+        g.folders.get(id).deleted = true
+        g.treeV++
+        break
+      }
+      case 'channel.move': {
+        const id = str(d.id, 32)
+        if (!id || g.dm) break
+        setFields(this._placement(g, id), placeFields(d), op)
+        g.treeV++
+        break
+      }
+      case 'game.join':
+      case 'game.decline':
+      case 'game.move':
+      case 'game.resign':
+      case 'game.draw':
+      case 'game.flag':
+      case 'game.abort': {
+        const id = str(d.id, 32)
+        if (!id) break
+        const gm = this._game(g, id)
+        gm.ops.push({
+          k: op.k.slice(5), a: op.a, s: op.s, t: op.t,
+          n: Number.isInteger(d.n) ? d.n : -1,
+          m: str(d.m, 5),
+          left: Number.isFinite(d.left) ? d.left : null,
+          no: !!d.no,
+          recv: Date.now() // when this app learned of it: clocks run on local time only
+        })
+        gm.v++
+        break
+      }
       case 'invite.create': {
         const id = str(d.id, 32)
         if (!id) break
@@ -483,17 +582,21 @@ export class Model {
           nameTs: [op.t, op.a],
           deleted: false
         })
+        setFields(this._placement(g, id), placeFields(d), op)
+        g.treeV++
         break
       }
       case 'channel.rename': {
         const ch = g.channels.get(d.id)
         const name = str(d.name, 48).trim()
         if (ch && name && later(op.t, op.a, ...ch.nameTs)) { ch.name = name; ch.nameTs = [op.t, op.a] }
+        g.treeV++
         break
       }
       case 'channel.delete': {
         const ch = g.channels.get(d.id)
         if (ch) ch.deleted = true
+        g.treeV++
         break
       }
       case 'profile': {
@@ -522,6 +625,7 @@ export class Model {
           }))
           : []
         const th = str(d.th, 32) || null
+        const game = !th && cleanGameInfo(d.game)
         const msg = {
           id, ch, a: op.a, t: op.t, s: op.s,
           text: str(d.text, MAX_TEXT),
@@ -529,11 +633,21 @@ export class Model {
           re: str(d.re, 32) || null,
           th, // a reply in the thread of this message
           also: !!(th && d.also), // ...also shown in the channel
+          // Claude's answer: posted (and signed) by the app of whoever asked, with their API key
+          bot: d.bot && typeof d.bot === 'object' && d.bot.n === 'claude' ? { model: str(d.bot.model, 40) } : null,
+          game: !!game, // the card of a chess game (see lib/games.js)
+          ping: game ? game.opp : null, // someone challenged to a game
           edited: 0,
           deleted: false,
           reactions: new Map()
         }
         g.msgById.set(id, msg)
+        g.claudeDrafts.delete(id)
+        if (game) {
+          const gm = this._game(g, id)
+          Object.assign(gm, { info: game, by: op.a, ch, t: op.t })
+          gm.v++
+        }
         if (th) {
           let tl = g.threads.get(th)
           if (!tl) { tl = []; g.threads.set(th, tl) }
@@ -596,6 +710,170 @@ export class Model {
     }
   }
 
+  _placement (g, id) {
+    let p = g.placement.get(id)
+    if (!p) { p = { folder: null, order: null, ts: {} }; g.placement.set(id, p) }
+    return p
+  }
+
+  _game (g, id) {
+    let gm = g.games.get(id)
+    if (!gm) { gm = { id, info: null, by: null, ch: null, t: 0, ops: [], v: 0, cacheV: -1, cache: null }; g.games.set(id, gm) }
+    return gm
+  }
+
+  // ---- folders & the channel tree ----
+
+  // The folder something shows in: its folder, or the nearest one above it that still exists
+  _liveFolder (g, id) {
+    const seen = new Set()
+    let f = id ? g.folders.get(id) : null
+    while (f && f.deleted && !seen.has(f.id)) { seen.add(f.id); f = f.parent ? g.folders.get(f.parent) : null }
+    return f && !f.deleted && f.createdBy ? f : null
+  }
+
+  // A folder's parent. If moves made at the same time put a folder inside itself (or deeper
+  // than MAX_FOLDER_DEPTH), it goes to the top level; every app decides that the same way.
+  folderParent (g, f) {
+    const p = this._liveFolder(g, f.parent)
+    const seen = new Set([f.id])
+    let x = p
+    let depth = 1
+    while (x) {
+      if (seen.has(x.id) || depth >= MAX_FOLDER_DEPTH) return null
+      seen.add(x.id)
+      x = this._liveFolder(g, x.parent)
+      depth++
+    }
+    return p
+  }
+
+  // How deep a folder sits (0 = top level)
+  folderDepth (g, f) {
+    let n = 0
+    for (let x = this.folderParent(g, f); x && n < MAX_FOLDER_DEPTH; x = this.folderParent(g, x)) n++
+    return n
+  }
+
+  // Is `id` the folder f or inside it?
+  inFolder (g, id, f) {
+    for (let x = g.folders.get(id); x; x = this.folderParent(g, x)) if (x.id === f.id) return true
+    return false
+  }
+
+  foldersOf (g) { return [...g.folders.values()].filter(f => !f.deleted && f.createdBy) }
+
+  channelFolder (g, chId) { return this._liveFolder(g, g.placement.get(chId)?.folder) }
+
+  sortKey (g, x) { return x.kind ? (g.placement.get(x.id)?.order ?? x.createdAt) : (x.order ?? x.createdAt) }
+
+  // { text, voice, folders }: channels outside folders by kind, then folders with their
+  // channels and sub-folders mixed in one order
+  channelTree (g) {
+    if (g._tree && g._tree.v === g.treeV) return g._tree
+    const byOrder = (a, b) => this.sortKey(g, a) - this.sortKey(g, b) || (a.id < b.id ? -1 : 1)
+    const nodes = new Map()
+    for (const f of this.foldersOf(g)) nodes.set(f.id, { f, items: [] })
+    const root = { text: [], voice: [], folders: [], v: g.treeV }
+    for (const node of nodes.values()) {
+      const p = this.folderParent(g, node.f)
+      if (p) nodes.get(p.id).items.push({ node, key: node.f })
+      else root.folders.push(node)
+    }
+    for (const c of g.channels.values()) {
+      if (c.deleted) continue
+      const f = g.dm ? null : this.channelFolder(g, c.id)
+      if (f) nodes.get(f.id).items.push({ ch: c, key: c })
+      else root[c.kind === 'voice' ? 'voice' : 'text'].push(c)
+    }
+    root.text.sort(byOrder)
+    root.voice.sort(byOrder)
+    root.folders.sort((a, b) => byOrder(a.f, b.f))
+    for (const node of nodes.values()) node.items.sort((a, b) => byOrder(a.key, b.key))
+    g._tree = root
+    return root
+  }
+
+  // Channels in the order the sidebar shows them
+  orderedChannels (g, kind) {
+    const tree = this.channelTree(g)
+    const out = [...tree.text, ...tree.voice]
+    const walk = (node) => { for (const it of node.items) it.ch ? out.push(it.ch) : walk(it.node) }
+    tree.folders.forEach(walk)
+    return kind ? out.filter(c => c.kind === kind) : out
+  }
+
+  // ---- games ----
+
+  gameState (g, id) {
+    const gm = g.games.get(id)
+    if (!gm) return null
+    if (gm.cacheV !== gm.v) { gm.cache = deriveChess(gm); gm.cacheV = gm.v }
+    return gm.cache
+  }
+
+  // Games whose card still exists, newest activity first
+  gamesOf (g) {
+    const out = []
+    for (const gm of g.games.values()) {
+      const m = g.msgById.get(gm.id)
+      if (!gm.info || !m || m.deleted) continue
+      const st = this.gameState(g, gm.id)
+      const last = st.plies.length ? st.plies[st.plies.length - 1].t : gm.t
+      out.push({ id: gm.id, gm, st, m, last })
+    }
+    return out.sort((a, b) => b.last - a.last)
+  }
+
+  // Waiting on me: my move, or a challenge to me
+  isMyTurn (st) {
+    const me = this.me.key
+    if (st.status === 'open') return st.info.opp === me
+    if (st.status !== 'active') return false
+    return (st.pos.turn === 'w' ? st.white : st.black) === me
+  }
+
+  myGameTurns (g) { return this.gamesOf(g).filter(x => this.isMyTurn(x.st)).length }
+
+  openGames (gid) {
+    this.ui.stage = null
+    this.ui.planner = null
+    this.selectGroup(gid)
+    this.ui.games = { gid, id: null }
+    this.ui.thread = null
+    this.emit()
+  }
+
+  openGame (gid, id) {
+    this.ui.stage = null
+    this.ui.planner = null
+    this.selectGroup(gid)
+    this.ui.games = { gid, id }
+    this.ui.thread = { gid, id } // the game's chat is the thread of its card
+    this.emit()
+  }
+
+  // ---- Claude ----
+
+  // Text Claude is still writing (sent live by the asker's app, see lib/claude.js)
+  setClaudeDraft (gid, from, d) {
+    const g = this.groups.get(gid)
+    const id = str(d.id, 32)
+    if (!g || !id || g.msgById.has(id)) return
+    if (d.done) g.claudeDrafts.delete(id)
+    else {
+      // one person asks one question at a time; don't let anyone flood the chat with drafts
+      const theirs = [...g.claudeDrafts.values()].filter(x => x.by === from && x.id !== id)
+      for (const x of theirs.slice(0, Math.max(0, theirs.length - 1))) g.claudeDrafts.delete(x.id)
+      g.claudeDrafts.set(id, { id, ch: str(d.ch, 32), th: str(d.th, 32) || null, text: str(d.text, MAX_TEXT * 2), by: from, re: str(d.re, 32) || null, t: Date.now(), status: str(d.status, 40) })
+    }
+    this.emit()
+  }
+
+  claudeDraftsIn (g, ch, th = null) {
+    return [...g.claudeDrafts.values()].filter(x => x.ch === ch && (th ? x.th === th : !x.th))
+  }
+
   _list (g, m) {
     let list = g.messages.get(m.ch)
     if (!list) { list = []; g.messages.set(m.ch, list) }
@@ -631,6 +909,7 @@ export class Model {
     if (!g) return
     g.online.delete(key)
     g.voice.delete(key)
+    for (const [id, x] of g.claudeDrafts) if (x.by === key) g.claudeDrafts.delete(id)
     for (const t of g.typing.values()) t.delete(key)
     this.emit()
   }
@@ -664,6 +943,8 @@ export class Model {
       for (const t of g.typing.values()) {
         for (const [k, exp] of t) if (exp < now) { t.delete(k); changed = true }
       }
+      // an answer whose writer went quiet (their app crashed or lost the connection)
+      for (const [id, x] of g.claudeDrafts) if (now - x.t > 90000) { g.claudeDrafts.delete(id); changed = true }
     }
     if (changed) this.emit()
   }
@@ -746,6 +1027,7 @@ export class Model {
   selectGroup (gid) {
     if (this.ui.gid !== gid) this.ui.thread = null
     if (this.ui.planner && this.ui.planner.gid !== gid) this.ui.planner = null
+    if (this.ui.games && this.ui.games.gid !== gid) this.ui.games = null
     this.ui.gid = gid
     this.ui.replyTo = null
     this.ui.editing = null
@@ -754,8 +1036,9 @@ export class Model {
   }
 
   selectChannel (gid, chId) {
-    if (this.ui.chByGroup[gid] !== chId) this.ui.thread = null
+    if (this.ui.chByGroup[gid] !== chId || this.ui.games) this.ui.thread = null
     this.ui.planner = null
+    this.ui.games = null
     this.ui.chByGroup[gid] = chId
     this.ui.replyTo = null
     this.ui.editing = null
@@ -781,9 +1064,9 @@ export class Model {
     let count = 0
     let mentions = 0
     for (let i = list.length - 1; i >= 0 && list[i].t > since; i--) {
-      if (list[i].a === this.me.key) continue
+      if (list[i].a === this.me.key && !list[i].bot) continue
       count++
-      if (this.mentionsMe(list[i].text)) mentions++
+      if (this.mentionsMe(list[i].text) || list[i].ping === this.me.key) mentions++
     }
     for (const [id, replies] of g.threads) {
       if (!replies.length || replies[0].ch !== chId) continue

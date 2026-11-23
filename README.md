@@ -13,6 +13,9 @@ directly between your computers, encrypted end to end.
 | Text channels, replies, edits, reactions, @mentions, markdown | ✅ | ✅ |
 | Threads (side panel, "also send to channel", follow + unread) | ✅ | ✅ |
 | Shared calendar (RSVP, reminders) and task board per group / private chat | ✅ | ❌ |
+| Folders for channels (nested up to 3 levels, drag and drop) | ✅ | one level (categories) |
+| Chess in any channel or private chat, with or without a clock | ✅ | via Activities |
+| Ask Claude (AI) with `@claude` in any chat, using your own API key | ✅ | ❌ |
 | One-time invite links, "only admins can invite" | ✅ | ✅ |
 | Emoji picker, `:shortcodes:`, pinned messages, link previews | ✅ | ✅ |
 | Friends, private chats and private calls | ✅ | ✅ |
@@ -150,6 +153,28 @@ Tips:
   the preview the sender attached. Pictures inside markdown files aren't loaded either.
 - **Noise suppression** runs [RNNoise](https://github.com/xiph/rnnoise) (a small neural network)
   in an AudioWorklet on your PC, before your voice is encoded.
+- **Nobody listens in, even with a modified app.** Your microphone only opens when you join a
+  voice channel. While you're muted, deafened or muted by a moderator, your app takes the mic
+  track off every connection, so no audio packet leaves your PC at all (it doesn't just send
+  silence). Your app only connects to people the network let into the group and who announced
+  that they're in *your* channel, so everyone who can hear you is listed under it; an offer from
+  anyone else is ignored. Your screen only goes to people in the call who appear in your viewer
+  list. A friend's app can't change any of this, because the decisions are made by yours.
+- **Folders** are ops like everything else (`folder.create`, `folder.set`, `channel.move`). Each
+  field keeps its newest value, and if two people move folders into each other at the same time,
+  every app breaks the loop the same way, so everyone sees the same tree. Folding is per device.
+- **Chess** games live in the group's log: the challenge is a message, every move a signed op.
+  Every app replays the moves with full rules (castling, en passant, promotion, check, mate,
+  stalemate, repetition, 50 moves, insufficient material), so an illegal move, or a move by
+  someone not playing, is simply ignored. If both players' apps sent a move for the same turn, the
+  one signed first counts. With a clock, each app measures its own player's thinking time, so the
+  clocks work even when your PCs' times differ.
+- **@claude** runs on the asker's PC: their app sends the recent messages of that chat (up to 40)
+  and any pictures or text files in their message to Anthropic with **their own API key**, shows
+  the answer to everyone online while it's being written, and posts it as a signed message marked
+  as Claude's. The key never leaves that PC (it's stored encrypted with Windows DPAPI, the macOS
+  keychain or your Linux keyring) and is never sent to friends. Friends without a key can't make
+  your app ask, and admins can turn `@claude` off per group.
 
 ### "Truly P2P": what does touch a third party?
 
@@ -164,6 +189,9 @@ Being precise about it:
 - **Websites you link to**, if link previews are on: your app fetches the page to build the preview,
   so that site sees your IP address (as if you'd opened the link). YouTube previews use YouTube's
   public oEmbed endpoint. Your friends' apps don't contact the site.
+- **Anthropic**, only when someone writes `@claude`: the asker's app sends that chat's recent
+  messages to Anthropic's API. If you'd rather keep a group's chats off it, an admin can turn
+  `@claude` off for that group (Claude settings in the group menu).
 
 ## Is it actually faster?
 
@@ -206,8 +234,13 @@ Without relays, a direct connection needs at least one of you to be on a "hole-p
   kick changes the key, because they are the key.
 - If the owner loses their data folder, nobody can promote new admins (existing admins keep
   their powers). Back up the folder (Settings → Storage shows where it is).
-- No push-to-talk (toggle hotkeys instead), search, custom emoji, bots or mobile app. Reminders
+- No push-to-talk (toggle hotkeys instead), search, custom emoji or mobile app. Reminders
   only fire while the app is running (it keeps running in the tray by default).
+- Claude only answers in text chats, not in voice channels, and only while the asker's app is
+  running. Each answer costs the asker a little on their Anthropic bill (Settings → Claude shows
+  this month's total).
+- A chess clock trusts each player's own app to report its time honestly, as there's no referee.
+  It's for friends, not for prize money.
 - A mesh is perfect for 3–5 people. For 10+ in one call you'd want an SFU (a server).
 - System-audio capture when screen sharing (Windows) captures *all* sound, including friends'
   voices, so they may hear themselves. It's off by default.
@@ -244,8 +277,8 @@ npm install
 npm start                 # run the app
 npm run dev:alice         # isolated profiles to simulate several friends on one PC
 npm run dev:bob
-npm test                  # headless tests: sync, gossip, auth, forged messages, files, kick, friends, one-time links, stubs
-npm run test:e2e          # drives two real app instances through every feature (chat, threads, planner, call, friends…)
+npm test                  # headless tests: sync, gossip, auth, forged messages, files, kick, friends, one-time links, stubs, chess rules, folders
+npm run test:e2e          # drives two real app instances through every feature (chat, threads, planner, folders, chess, @claude against a local stand-in, call, friends…)
 npm run dist              # Windows installer + portable .exe into dist/
 npm run test:update       # after dist: update flow against a local feed (never installs anything)
 ```

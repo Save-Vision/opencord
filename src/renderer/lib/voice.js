@@ -183,7 +183,7 @@ export class Voice {
     this._broadcastState()
     const g = this.model.groups.get(gid)
     for (const [key, st] of g.voice) {
-      if (st.ch === ch && g.online.has(key)) this._ensureCall(key, st)
+      if (this._peerAllowed(key, st)) this._ensureCall(key, st)
     }
     this.api.voiceHotkeys(true)
     playTone('join')
@@ -240,7 +240,7 @@ export class Voice {
   onRemoteVoiceState (gid, key, st) {
     if (!this.active || gid !== this.active.gid) return
     const call = this.calls.get(key)
-    if (st.ch === this.active.ch && st.sid) {
+    if (this._peerAllowed(key, st)) {
       if (!call || call.remoteSid !== st.sid) {
         if (call) this._closeCall(call)
         this._ensureCall(key, st)
@@ -275,10 +275,36 @@ export class Voice {
     this.model.emit()
   }
 
+  // A viewer has to be in the call with us, and shows up in the viewer list like anyone else
   _remoteWatchesMe (key) {
     const g = this.active && this.model.groups.get(this.active.gid)
     const st = g?.voice.get(key)
-    return !!st && st.ch === this.active.ch && Array.isArray(st.watch) && st.watch.includes(this.myKey)
+    return !!this.local.screen && this._peerAllowed(key, st) && Array.isArray(st.watch) && st.watch.includes(this.myKey)
+  }
+
+  // Who may get a connection (and so our voice) at all: someone the network let into the group
+  // (a valid membership proof, not kicked) who announced, to us, that they're in our channel.
+  // Everyone we connect to is listed under the channel, so nobody can listen in unseen.
+  _peerAllowed (key, st) {
+    if (!this.active || !st || st.ch !== this.active.ch || typeof st.sid !== 'string' || !st.sid || st.sid.length > 64) return false
+    if (key === this.myKey) return false
+    const g = this.model.groups.get(this.active.gid)
+    return !!g && !g.kickedMe && g.online.has(key) && !g.removed.has(key)
+  }
+
+  // Our microphone only goes out while we're unmuted. Muted, deafened or muted by a moderator,
+  // the track is taken off every connection, so not a single audio packet leaves this PC, no
+  // matter what the other side's app does.
+  get micLive () { return !!this.active && !this.muted && !this.deafened && !this.serverMuted }
+
+  // Close connections that are no longer allowed (kicked, removed, left the channel)
+  reconcile () {
+    if (!this.active) return
+    const g = this.model.groups.get(this.active.gid)
+    for (const call of [...this.calls.values()]) {
+      if (!this._peerAllowed(call.key, g?.voice.get(call.key))) this._closeCall(call)
+      else this._attachLocalTracks(call)
+    }
   }
 
   // A moderator moved us to another voice channel (ch) or disconnected us (ch = null).
@@ -306,6 +332,7 @@ export class Voice {
     const was = this._wasServerMuted
     this._wasServerMuted = this.serverMuted
     this._applyMute()
+    this.reconcile()
     this.applyOutputDevice()
     if (was !== undefined && was !== this.serverMuted) {
       this._broadcastState()
@@ -449,7 +476,7 @@ export class Voice {
 
   _localTracks (withScreen = true) {
     return [
-      this.local.mic?.getAudioTracks()[0] || null,
+      (this.micLive && this.local.mic?.getAudioTracks()[0]) || null,
       (withScreen && this.local.screen?.getVideoTracks()[0]) || null,
       (withScreen && this.local.screen?.getAudioTracks()[0]) || null,
       this.local.cam?.getVideoTracks()[0] || null
@@ -584,7 +611,8 @@ export class Voice {
 
   _applyMute () {
     const t = this.local.mic?.getAudioTracks()[0]
-    if (t) t.enabled = !this.muted && !this.deafened && !this.serverMuted
+    if (t) t.enabled = this.micLive
+    for (const call of this.calls.values()) this._attachLocalTracks(call)
   }
 
   toggleMute () {
