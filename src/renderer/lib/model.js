@@ -4,6 +4,8 @@
 const MAX_TEXT = 4000
 const later = (t1, a1, t2, a2) => t1 > t2 || (t1 === t2 && a1 > a2)
 const str = (v, max) => (typeof v === 'string' ? v.slice(0, max) : '')
+// Same rule as the main process (store.js): a small raster image as a data URL.
+export const isAvatarUrl = (s) => typeof s === 'string' && s.length <= 48 * 1024 && /^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/]+={0,2}$/.test(s)
 
 export const shortKey = (key) => key ? key.slice(0, 4) + '…' + key.slice(-4) : ''
 
@@ -145,6 +147,7 @@ export class Model {
           m.profileTs = op.t
           m.name = str(d.name, 32).trim()
           if (/^#[0-9a-f]{6}$/i.test(d.color || '')) m.color = d.color
+          m.avatar = isAvatarUrl(d.avatar) ? d.avatar : null
         }
         break
       }
@@ -272,6 +275,11 @@ export class Model {
     if (key === this.me?.key && this.me.name) return this.me.name
     const m = g?.members.get(key)
     return (m && m.name) || 'Friend ' + key.slice(0, 4)
+  }
+
+  memberAvatar (g, key) {
+    if (key === this.me?.key) return this.me.avatar || null
+    return g?.members.get(key)?.avatar || null
   }
 
   memberColor (g, key) {

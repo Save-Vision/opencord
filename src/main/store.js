@@ -10,6 +10,11 @@ const { EventEmitter } = require('events')
 const c = require('./crypto')
 
 const MAX_OP_BYTES = 64 * 1024
+// Profile pictures travel inside the (signed) profile op as a small data URL, so they sync with
+// the history and show even when the friend is offline. The UI crops and shrinks them to 256 px.
+const MAX_AVATAR_CHARS = 48 * 1024
+const AVATAR_RE = /^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/]+={0,2}$/
+const isAvatar = (s) => typeof s === 'string' && s.length <= MAX_AVATAR_CHARS && AVATAR_RE.test(s)
 
 const DEFAULT_SETTINGS = {
   // STUN servers only tell your computer its public IP:port so WebRTC can hole-punch.
@@ -27,7 +32,9 @@ const DEFAULT_SETTINGS = {
     voiceBitrate: 96000
   },
   screen: { preset: '1080p60', contentHint: 'motion', codec: 'auto', audio: false },
-  volumes: {}
+  volumes: {},
+  // Check GitHub for new versions and install them on restart
+  autoUpdate: true
 }
 
 const COLORS = ['#2dd4bf', '#f472b6', '#fbbf24', '#60a5fa', '#a78bfa', '#f87171', '#4ade80', '#fb923c']
@@ -120,15 +127,28 @@ class Store extends EventEmitter {
 
   // ---- identity & settings ----
 
-  setProfile ({ name, color }) {
+  setProfile ({ name, color, avatar }) {
     if (typeof name === 'string') this.identity.name = name.trim().slice(0, 32)
     if (typeof color === 'string' && /^#[0-9a-f]{6}$/i.test(color)) this.identity.color = color
+    if (avatar === null) delete this.identity.avatar
+    else if (avatar !== undefined) {
+      if (!isAvatar(avatar)) throw new Error('Profile picture must be a small PNG, JPEG or WebP image')
+      this.identity.avatar = avatar
+    }
     writeJSONAtomic(path.join(this.dir, 'identity.json'), this.identity)
     return this.publicIdentity()
   }
 
+  // What goes into 'profile' ops. Each one is the full profile, so leaving out the avatar
+  // removes it.
+  profileData () {
+    const d = { name: this.identity.name, color: this.identity.color }
+    if (this.identity.avatar) d.avatar = this.identity.avatar
+    return d
+  }
+
   publicIdentity () {
-    return { key: this.myKey, name: this.identity.name, color: this.identity.color }
+    return { key: this.myKey, name: this.identity.name, color: this.identity.color, avatar: this.identity.avatar || null }
   }
 
   setSettings (patch) {
@@ -155,14 +175,14 @@ class Store extends EventEmitter {
     this.append(group.id, 'group.init', { name })
     this.append(group.id, 'channel.create', { id: rnd(), name: 'general', kind: 'text' })
     this.append(group.id, 'channel.create', { id: rnd(), name: 'General', kind: 'voice' })
-    this.append(group.id, 'profile', { name: this.identity.name, color: this.identity.color })
+    this.append(group.id, 'profile', this.profileData())
     return group
   }
 
   joinGroup (invite) {
     const { secret, name } = c.parseInvite(invite)
     const { group, existed } = this._createGroupFromSecret(secret, name)
-    if (!existed) this.append(group.id, 'profile', { name: this.identity.name, color: this.identity.color })
+    if (!existed) this.append(group.id, 'profile', this.profileData())
     return { group, existed }
   }
 
@@ -268,4 +288,4 @@ class Store extends EventEmitter {
   }
 }
 
-module.exports = { Store, DEFAULT_SETTINGS, COLORS }
+module.exports = { Store, DEFAULT_SETTINGS, COLORS, isAvatar, MAX_AVATAR_CHARS }

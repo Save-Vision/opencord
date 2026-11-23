@@ -69,6 +69,32 @@ test('invite codes round-trip and reject garbage', () => {
   assert.throws(() => c.parseInvite('OD1-bm9wZQ'))
 })
 
+test('next release version counts up from published releases', () => {
+  const { nextVersion } = require('../scripts/next-version')
+  assert.strictEqual(nextVersion('0.2.0', []), '0.2.0')
+  assert.strictEqual(nextVersion('0.2.0', ['v0.2.0', 'v0.2.1']), '0.2.2')
+  assert.strictEqual(nextVersion('0.2.0', ['v0.2.9', 'v0.2.10', 'junk', '']), '0.2.11')
+  assert.strictEqual(nextVersion('0.3.0', ['v0.2.7']), '0.3.0')
+  assert.strictEqual(nextVersion('0.2.0', ['v0.3.4']), '0.3.5')
+})
+
+test('profile pictures are validated, fit in an op, and can be removed', () => {
+  const { MAX_AVATAR_CHARS } = require('../src/main/store')
+  const store = new Store(path.join(tmpRoot, 'pic')).load()
+  const prefix = 'data:image/webp;base64,'
+  const biggest = prefix + 'A'.repeat(MAX_AVATAR_CHARS - prefix.length)
+  assert.strictEqual(store.setProfile({ name: 'Pic', avatar: biggest }).avatar, biggest)
+  const g = store.createGroup('Pics')
+  const op = store.append(g.id, 'profile', store.profileData()) // must not exceed the op size limit
+  assert.strictEqual(op.d.avatar, biggest)
+  assert.throws(() => store.setProfile({ avatar: biggest + 'AAAA' }), /small/)
+  assert.throws(() => store.setProfile({ avatar: 'data:image/svg+xml;base64,PHN2Zz4=' }), /PNG, JPEG or WebP/)
+  assert.throws(() => store.setProfile({ avatar: 'https://example.com/me.png' }))
+  store.setProfile({ avatar: null })
+  assert.strictEqual(store.profileData().avatar, undefined)
+  assert.strictEqual(store.publicIdentity().avatar, null)
+})
+
 test('three friends: join, live chat, offline catch-up via a third peer, files, intruders', async (t) => {
   const alice = await makeNode('alice')
   const bob = await makeNode('bob')
@@ -100,6 +126,15 @@ test('three friends: join, live chat, offline catch-up via a third peer, files, 
 
   // RTT measured by pings
   await waitFor(() => alice.net.onlinePeers()[0]?.rtt != null, 12000, 'rtt')
+
+  // Diagnostics: the group shows one connected friend, and failed dials are recorded with a reason
+  const diag = await alice.net.diagnostics()
+  assert.strictEqual(diag.dht.online, true)
+  assert.deepStrictEqual({ found: diag.groups[group.id].found, connected: diag.groups[group.id].connected }, { found: 1, connected: 1 })
+  const ghost = crypto.randomBytes(32)
+  alice.net.swarm.dht.connect(ghost).on('error', () => {})
+  await waitFor(() => alice.net.failures.get(ghost.toString('hex')), 15000, 'failed dial to be recorded')
+  assert.ok(alice.net.failures.get(ghost.toString('hex')).code)
 
   // File transfer with integrity check
   const data = crypto.randomBytes(3 * 1024 * 1024 + 123)

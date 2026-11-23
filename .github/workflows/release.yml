@@ -1,0 +1,85 @@
+name: Release
+
+# Every push to main builds the Windows app and publishes it as a GitHub release.
+# Installed copies of OpenDiscord find it within a few hours (or via Settings → Updates)
+# and update themselves.
+#
+# Versions are automatic: major.minor come from package.json, the patch number counts up
+# (see scripts/next-version.js). Put [skip release] in a commit message to push without releasing.
+#
+# Where releases go:
+#   - By default, this repository. The app downloads updates without logging in, so this
+#     only works if the repository is public.
+#   - To keep this repository private, create a separate public repository for releases
+#     (with at least one commit, e.g. a README). Then, in THIS repository's
+#     Settings → Secrets and variables → Actions, add:
+#       Variable RELEASES_REPO  = owner/name of the public repository
+#       Secret   RELEASES_TOKEN = a fine-grained token with "Contents: Read and write" on it
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: ${{ !contains(github.event.head_commit.message, '[skip release]') }}
+    runs-on: windows-latest
+    env:
+      RELEASES_REPO: ${{ vars.RELEASES_REPO || github.repository }}
+      GH_TOKEN: ${{ secrets.RELEASES_TOKEN || github.token }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Test
+        run: npm test
+
+      - name: Pick version
+        id: version
+        run: echo "version=$(node scripts/next-version.js "$RELEASES_REPO")" >> "$GITHUB_OUTPUT"
+
+      - name: Build installer and portable exe
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          npx electron-builder --win --publish never \
+            -c.extraMetadata.version="$VERSION" \
+            -c.publish.owner="${RELEASES_REPO%%/*}" \
+            -c.publish.repo="${RELEASES_REPO##*/}"
+
+      - name: Publish release
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          {
+            echo "## What's changed"
+            jq -r 'if ((.commits // []) | length) > 0 then .commits[] | "- " + (.message | split("\n")[0]) else "- Manual build" end' "$GITHUB_EVENT_PATH"
+            echo
+            echo "**Already using OpenDiscord?** It updates itself. **New?** Download \`OpenDiscord-Setup-$VERSION.exe\`."
+          } > notes.md
+          target=()
+          if [ "$RELEASES_REPO" = "$GITHUB_REPOSITORY" ]; then target=(--target "$GITHUB_SHA"); fi
+          gh release create "v$VERSION" \
+            "dist/OpenDiscord-Setup-$VERSION.exe" \
+            "dist/OpenDiscord-Setup-$VERSION.exe.blockmap" \
+            "dist/OpenDiscord-$VERSION-portable.exe" \
+            dist/latest.yml \
+            --repo "$RELEASES_REPO" "${target[@]}" \
+            --title "OpenDiscord $VERSION" --notes-file notes.md

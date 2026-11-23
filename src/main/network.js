@@ -9,6 +9,8 @@
 // Authorization: being connected is not enough — each side must prove it knows the group
 // secret with an HMAC bound to this connection's Noise handshake hash.
 const fs = require('fs')
+const os = require('os')
+const dgram = require('dgram')
 const crypto = require('crypto')
 const { EventEmitter } = require('events')
 const Hyperswarm = require('hyperswarm')
@@ -19,6 +21,37 @@ const PROTOCOL_VERSION = 1
 const SYNC_BATCH_BYTES = 1024 * 1024
 const BLOB_CHUNK = 64 * 1024
 const BLOB_IDLE_TIMEOUT = 30000
+
+// Interface names used by common VPN clients (Windows shows the connection name, e.g. "ProTUN").
+const VPN_IFACE = /(vpn|wireguard|proton|protun|nord|mullvad|surfshark|cyberghost|windscribe|ipvanish|openvpn|tailscale|zerotier|\btun\d*\b|\btap\b|\bwg\d*\b|\butun\d*\b)/i
+
+// Which local interface carries internet traffic? A UDP "connect" picks the route without
+// sending any packet. If that interface is a VPN, P2P traffic goes through the VPN server.
+function defaultRoute () {
+  return new Promise((resolve) => {
+    const sock = dgram.createSocket('udp4')
+    let done = false
+    const finish = (v) => {
+      if (done) return
+      done = true
+      try { sock.close() } catch {}
+      resolve(v)
+    }
+    sock.on('error', () => finish(null))
+    setTimeout(() => finish(null), 1000)
+    try {
+      sock.connect(53, '1.1.1.1', () => {
+        let address = null
+        try { address = sock.address().address } catch { return finish(null) }
+        let iface = null
+        for (const [name, addrs] of Object.entries(os.networkInterfaces())) {
+          if ((addrs || []).some(a => a.address === address)) iface = name
+        }
+        finish({ address, iface, vpn: VPN_IFACE.test(iface || '') })
+      })
+    } catch { finish(null) }
+  })
+}
 
 function isLanAddress (host) {
   if (!host) return false
@@ -35,21 +68,92 @@ class Network extends EventEmitter {
     this.store = store
     this.bootstrap = opts.bootstrap
     this.authTimeout = opts.authTimeout || 30000
+    this.lonelyInterval = opts.lonelyInterval || 60000
+    this.appVersion = typeof opts.appVersion === 'string' ? opts.appVersion : null
     this.peers = new Map() // remoteKeyHex -> peer
     this.incoming = new Map() // `${peerKey}:${id}` -> transfer
     this.inflight = new Map() // hash -> Promise<path>
     this.nextTransferId = 1
     this.started = false
+    this.discoveries = new Map() // groupId -> hyperswarm discovery session
+    this.failures = new Map() // remoteKeyHex -> { code, message, at, count }
   }
 
   async start () {
     this.swarm = new Hyperswarm({ keyPair: this.store.keyPair, bootstrap: this.bootstrap })
     this.swarm.on('connection', (conn, info) => this._onConnection(conn, info))
-    for (const g of this.store.groups.values()) this.swarm.join(g.topic, { server: true, client: true })
+    // Hyperswarm silently retries failed connections; record *why* they fail
+    // (e.g. HOLEPUNCH_DOUBLE_RANDOMIZED_NATS) so the UI can explain it.
+    const dht = this.swarm.dht
+    const connect = dht.connect.bind(dht)
+    dht.connect = (publicKey, opts) => {
+      const stream = connect(publicKey, opts)
+      const key = Buffer.from(publicKey).toString('hex')
+      stream.on('error', (err) => {
+        const prev = this.failures.get(key)
+        this.failures.set(key, { code: err.code || 'ERROR', message: err.message, at: Date.now(), count: (prev?.count || 0) + 1 })
+      })
+      stream.on('open', () => this.failures.delete(key))
+      return stream
+    }
+    for (const g of this.store.groups.values()) this._join(g)
+    // Hyperswarm only re-runs lookups every ~10 min, and stops retrying a peer after a few
+    // failed hole punches. While a group has nobody connected, look again every minute so a
+    // friend who just came online (or fixed their network) is found quickly.
+    this.lonelyTimer = setInterval(() => this._refreshLonely(), this.lonelyInterval)
+    this.lonelyTimer.unref?.()
     this.started = true
   }
 
+  _refreshLonely () {
+    for (const [gid, d] of this.discoveries) {
+      if (this.peersIn(gid).length === 0) d.refresh().catch(() => {})
+    }
+  }
+
+  _join (group) {
+    this.discoveries.set(group.id, this.swarm.join(group.topic, { server: true, client: true }))
+  }
+
+  // Look the group topics up again right now instead of waiting for the periodic refresh
+  // (Hyperswarm backs off for minutes after a few failed attempts).
+  async retry () {
+    this.failures.clear()
+    await Promise.allSettled([...this.discoveries.values()].map(d => d.refresh()))
+  }
+
+  async diagnostics () {
+    const dht = this.swarm?.dht
+    const route = await defaultRoute()
+    const groups = {}
+    for (const g of this.store.groups.values()) {
+      const topic = g.topic.toString('hex')
+      const found = []
+      for (const [key, info] of this.swarm?.peers || []) {
+        if ((info.topics || []).some(t => Buffer.from(t).toString('hex') === topic)) found.push(key)
+      }
+      const connected = this.peersIn(g.id).map(p => p.key)
+      groups[g.id] = {
+        found: new Set([...found, ...connected]).size,
+        connected: connected.length,
+        failures: found.filter(k => !connected.includes(k) && this.failures.has(k)).map(k => ({ peer: k.slice(0, 8), ...this.failures.get(k) }))
+      }
+    }
+    return {
+      dht: {
+        online: !!dht && !dht.destroyed && dht.bootstrapped,
+        firewalled: dht ? dht.firewalled : null,
+        randomized: dht ? dht.randomized : null,
+        natKnown: !!(dht && dht.host)
+      },
+      route,
+      connecting: this.swarm?.connecting || 0,
+      groups
+    }
+  }
+
   async stop () {
+    clearInterval(this.lonelyTimer)
     if (!this.swarm) return
     for (const p of this.peers.values()) this._cleanupPeer(p)
     await this.swarm.destroy()
@@ -58,7 +162,7 @@ class Network extends EventEmitter {
   // ---- groups ----
 
   joinGroup (group) {
-    this.swarm.join(group.topic, { server: true, client: true })
+    this._join(group)
     for (const peer of this.peers.values()) {
       this._evaluate(peer)
       this._send(peer, { t: 'auth', tags: this._myTags(peer) })
@@ -66,6 +170,7 @@ class Network extends EventEmitter {
   }
 
   leaveGroup (group) {
+    this.discoveries.delete(group.id)
     this.swarm.leave(group.topic).catch(() => {})
     for (const peer of this.peers.values()) {
       if (peer.groups.delete(group.id)) this.emit('peer-leave', group.id, peer.key)
@@ -101,6 +206,7 @@ class Network extends EventEmitter {
       host: peer.host,
       family: peer.family,
       lan: isLanAddress(peer.host),
+      version: peer.appVersion || null,
       groups: [...peer.groups],
       since: peer.connectedAt
     }
@@ -144,7 +250,7 @@ class Network extends EventEmitter {
     conn.on('close', () => this._dropPeer(peer))
     this.peers.set(key, peer)
 
-    this._send(peer, { t: 'hello', v: PROTOCOL_VERSION, tags: this._myTags(peer) })
+    this._send(peer, { t: 'hello', v: PROTOCOL_VERSION, app: this.appVersion, tags: this._myTags(peer) })
     peer.authTimer = setTimeout(() => { if (!peer.groups.size) conn.destroy() }, this.authTimeout)
     peer.pingTimer = setInterval(() => this._send(peer, { t: 'ping', ts: Date.now() }), 5000)
   }
@@ -195,6 +301,7 @@ class Network extends EventEmitter {
       switch (msg.t) {
         case 'hello':
         case 'auth':
+          if (msg.t === 'hello' && typeof msg.app === 'string' && /^\d+\.\d+\.\d+[\w.-]{0,20}$/.test(msg.app)) peer.appVersion = msg.app
           if (!Array.isArray(msg.tags)) return
           peer.remoteTags = new Set(msg.tags.slice(0, 512).filter(t => typeof t === 'string'))
           this._evaluate(peer)
@@ -411,4 +518,4 @@ function importBlobBuffer (store, buf) {
   return { hash, size: buf.length }
 }
 
-module.exports = { Network, importBlobFile, importBlobBuffer, isLanAddress }
+module.exports = { Network, importBlobFile, importBlobBuffer, isLanAddress, defaultRoute, VPN_IFACE }

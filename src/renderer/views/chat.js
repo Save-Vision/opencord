@@ -9,10 +9,10 @@ import { Icon } from '../lib/icons.js'
 const drafts = new Map()
 const PAGE = 150
 
-export function Avatar ({ name, color, size = 40, speaking = false, dot = null }) {
+export function Avatar ({ name, color, src = null, size = 40, speaking = false, dot = null }) {
   return html`
-    <div class="avatar ${speaking ? 'speaking' : ''}" style=${{ width: size + 'px', height: size + 'px', '--c': color, fontSize: Math.round(size * 0.38) + 'px' }}>
-      <span>${initials(name)}</span>
+    <div class="avatar ${speaking ? 'speaking' : ''} ${src ? 'has-img' : ''}" style=${{ width: size + 'px', height: size + 'px', '--c': color, fontSize: Math.round(size * 0.38) + 'px' }}>
+      ${src ? html`<img src=${src} alt="" draggable="false" />` : html`<span>${initials(name)}</span>`}
       ${dot && html`<i class="presence ${dot}" />`}
     </div>`
 }
@@ -145,7 +145,7 @@ function Message ({ g, m, grouped, ctx, onMediaLoad }) {
         </div>`}
       ${grouped
         ? html`<span class="gutter-time">${fmtTime(m.t)}</span>`
-        : html`<div class="msg-avatar"><${Avatar} name=${name} color=${color} /></div>`}
+        : html`<div class="msg-avatar"><${Avatar} name=${name} color=${color} src=${model.memberAvatar(g, m.a)} /></div>`}
       <div class="msg-body">
         ${!grouped && html`<div class="msg-head"><span class="author" style=${{ color }}>${name}</span><time title=${new Date(m.t).toLocaleString()}>${fmtStamp(m.t)}</time></div>`}
         ${editing

@@ -15,6 +15,8 @@ directly between your computers, encrypted end to end.
 | Voice channels | ✅ Opus up to 192 kbps | 64–96 kbps |
 | Screen share | ✅ up to 4K · 60 fps, GPU-encoded (H.264/HEVC/AV1) | 720p · 30 fps |
 | Webcam | ✅ | ✅ |
+| Profile pictures | ✅ synced with your profile, visible offline | ✅ |
+| Updates | ✅ automatic, from this repo's GitHub releases | ✅ |
 | Where your data lives | only on your three PCs | Discord's servers |
 | Encryption | end to end, always | calls only; messages readable by Discord |
 
@@ -23,21 +25,25 @@ codec**, so you can see what you're getting.
 
 ## Getting started (for your friends)
 
-**Windows:** run `OpenDiscord-0.1.0-portable.exe` (build it with `npm run dist`, see below).
-Windows SmartScreen will warn because the app isn't code-signed: *More info → Run anyway*.
-If Windows Firewall asks, allow access on **private networks**.
+**Windows:** download `OpenDiscord-Setup-<version>.exe` from the newest
+[release](../../releases) and run it. It installs for your user only (no admin needed) and
+**updates itself** from then on. Windows SmartScreen will warn because the app isn't code-signed:
+*More info → Run anyway*. If Windows Firewall asks, allow access on **private networks**.
+(There's also a portable `.exe`. It can't update itself, so its first update installs the app.)
 
 **Mac/Linux:** install [Node.js 20+](https://nodejs.org), then from this folder:
 `npm install` and `npm start`. (Mac `.dmg`/Linux AppImage builds have to be made on those systems:
 `npm run dist:mac` / `npm run dist:linux`.)
 
 Then:
-1. Pick a display name.
+1. Pick a display name. You can add a profile picture in Settings → My profile.
 2. One person clicks **Create a group** and copies the invite code (`OD1-…`).
 3. Send the code to your friends privately (in person, Signal, WhatsApp). **The code is the group
    key:** anyone who has it can join and read the history.
 4. Friends click **Join with invite** and paste it. Channels and history sync as soon as anyone
    in the group is online.
+5. If you still don't see each other after a minute, see
+   [If you can't see each other](#if-you-cant-see-each-other). (VPNs are the usual cause.)
 
 Tips:
 - Closing the window keeps the app running in the tray, so friends can sync messages from you.
@@ -100,15 +106,24 @@ Being precise about it:
   routing through a Discord data center. You save the detour, but most mouth-to-ear delay comes
   from audio buffering on both ends, so expect "snappier", not "night and day".
 
-## If a call won't connect
+## If you can't see each other
 
-Without relays, a direct connection needs at least one of you to be reachable:
-- **IPv6** is the best fix and is enabled on most fiber and many cable connections. If both of you
-  have it, it almost always connects. Check the path label on the call tile.
-- Hole punching fails when **both** sides are behind strict "symmetric" NAT, which is common with
-  **CGNAT** (mobile hotspots, some cable/fiber providers, DS-Lite IPv4). Ask your ISP for a
-  public IPv4 or "Dual Stack", or use IPv6.
+**Settings → Network → Connection check** (also shown on the "Waiting for a friend" screen) tells
+you what's wrong: whether you're on the P2P network, whether a VPN is in the way, your NAT type,
+and *why* connecting to a friend failed. **Copy diagnostics** gives you a text summary to send to each other.
+
+Without relays, a direct connection needs at least one of you to be on a "hole-punchable" network:
+- **Turn off your VPN** (or exclude OpenDiscord in its split-tunneling settings). This is the most
+  common cause. VPN servers use NATs that block hole punching, and calls would detour through the VPN
+  server anyway.
+- Hole punching fails when **both** sides are behind a "randomized" NAT: VPNs, mobile hotspots,
+  and **CGNAT** (some cable/fiber providers, DS-Lite). One friend on normal home internet is enough
+  to connect to both others. If you're stuck behind CGNAT, ask your ISP for a public IPv4 address.
+- IPv6 doesn't help with this part: the P2P network (HyperDHT) connects over IPv4 only. Once you're
+  connected, calls do use IPv6 if both of you have it.
 - On the same Wi-Fi it always works (LAN).
+- After fixing your network, click **Retry now**. The app also looks for friends again every minute
+  while nobody is connected.
 
 ## Limitations (it's a side project)
 
@@ -121,6 +136,30 @@ Without relays, a direct connection needs at least one of you to be reachable:
 - System-audio capture when screen sharing (Windows) captures *all* sound, including friends'
   voices, so they may hear themselves. It's off by default.
 
+## Updates and releases
+
+**For everyone using the app:** it checks GitHub for a new version a few seconds after starting
+and every 3 hours after that. It downloads new versions in the background and verifies their
+SHA-512 hash. A green **Restart to update** button then appears in the title bar. If you
+ignore it, the update installs the next time you quit the app. Settings → Updates shows the
+version, lets you check by hand, and turns automatic checks off.
+
+**For whoever maintains the repo:** releasing is automatic.
+[`.github/workflows/release.yml`](.github/workflows/release.yml) runs on every push to `main`. It
+runs the tests, builds the installer and portable exe, and publishes a GitHub release `vX.Y.Z`.
+- **Version numbers:** `major.minor` comes from `package.json` and the patch number counts up
+  by itself (0.2.0, 0.2.1, 0.2.2, …). For a bigger release, set `package.json` to e.g. `0.3.0`.
+- **Skipping a release:** put `[skip release]` in the commit message to push without releasing.
+- **The repository must be public**, because the app downloads updates without logging in.
+  To keep the source private, create a separate **public** repo for releases (with a README so
+  it has a commit). Then, in this repo's *Settings → Secrets and variables → Actions*, add:
+  - the variable `RELEASES_REPO` set to `owner/name` of that repo, and
+  - the secret `RELEASES_TOKEN`, a fine-grained token with *Contents: Read and write* on it.
+
+  The workflow then publishes there and builds the app to look for updates there.
+- **Security:** anyone who can push to `main` (or holds that token) can ship code to every
+  friend's PC. Keep push access to people you trust, and turn on 2FA.
+
 ## Development
 
 ```bash
@@ -129,8 +168,9 @@ npm start                 # run the app
 npm run dev:alice         # isolated profiles to simulate several friends on one PC
 npm run dev:bob
 npm test                  # headless tests: sync, gossip, auth, forged messages, file transfer
-npm run test:e2e          # drives two real app instances: chat, image, voice call, screen share
+npm run test:e2e          # drives two real app instances: chat, image, avatar, voice call, screen share
 npm run dist              # Windows installer + portable .exe into dist/
+npm run test:update       # after dist: update flow against a local feed (never installs anything)
 ```
 
 `OD_EXE=dist/win-unpacked/OpenDiscord.exe npm run test:e2e` runs the same e2e against the
@@ -141,7 +181,8 @@ Screenshots go to `test/screenshots/` (gitignored, because they can contain your
 src/main/      Electron main process
   crypto.js    invite codes, membership HMAC, op signatures
   store.js     identity, settings, per-group signed op log, blob store
-  network.js   Hyperswarm connections, auth, sync/gossip, file transfer
+  network.js   Hyperswarm connections, auth, sync/gossip, file transfer, diagnostics
+  updater.js   self-update from GitHub releases
   framing.js   length-prefixed JSON/binary frames
   main.js      window, IPC, custom protocols, screen-capture picker
 src/preload/   the narrow API the UI is allowed to call

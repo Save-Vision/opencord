@@ -165,6 +165,7 @@ export function handleNewOps (gid, ops) {
     try {
       const n = new Notification(`${model.memberName(g, op.a)} · #${ch?.name || 'channel'}`, {
         body: (op.d.text || '').slice(0, 180) || (op.d.att?.length ? '📎 sent a file' : ''),
+        icon: model.memberAvatar(g, op.a) || undefined,
         silent: false
       })
       n.onclick = () => {

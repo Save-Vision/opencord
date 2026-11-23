@@ -2,7 +2,7 @@
 // The only bridge between the sandboxed UI and the main process.
 const { contextBridge, ipcRenderer, webUtils } = require('electron')
 
-const EVENTS = new Set(['ops', 'peer-join', 'peer-leave', 'peer-update', 'eph', 'blob-progress', 'focus-change', 'hotkey'])
+const EVENTS = new Set(['ops', 'peer-join', 'peer-leave', 'peer-update', 'eph', 'blob-progress', 'focus-change', 'hotkey', 'update'])
 const invoke = (ch, ...args) => ipcRenderer.invoke(ch, ...args)
 
 contextBridge.exposeInMainWorld('od', {
@@ -28,6 +28,13 @@ contextBridge.exposeInMainWorld('od', {
 
   screenSources: () => invoke('screen:sources'),
   selectScreen: (id, audio) => invoke('screen:select', id, audio),
+
+  netStatus: () => invoke('net:status'),
+  netRetry: () => invoke('net:retry'),
+
+  updateState: () => invoke('update:state'),
+  checkForUpdate: () => invoke('update:check'),
+  installUpdate: () => invoke('update:install'),
 
   openExternal: (url) => invoke('shell:open', url),
   copy: (text) => invoke('clipboard:write', text),

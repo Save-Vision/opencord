@@ -58,7 +58,7 @@ export function VoiceStage ({ g, ch }) {
           <div class="intro-icon big"><${Icon} name="speaker" size=${44} /></div>
           <h1>${ch.name}</h1>
           <p>${keys.length ? `${keys.map(k => model.memberName(g, k)).join(', ')} ${keys.length > 1 ? 'are' : 'is'} here.` : 'Nobody is here yet.'}</p>
-          <div class="stage-avatars">${keys.map(k => html`<${Avatar} key=${k} name=${model.memberName(g, k)} color=${model.memberColor(g, k)} size=${56} />`)}</div>
+          <div class="stage-avatars">${keys.map(k => html`<${Avatar} key=${k} name=${model.memberName(g, k)} color=${model.memberColor(g, k)} src=${model.memberAvatar(g, k)} size=${56} />`)}</div>
           <button class="btn primary lg" onClick=${() => act(() => voice.join(g.id, ch.id))}>Join voice</button>
           <small class="muted">Audio, video and screen shares go directly between you, encrypted with DTLS-SRTP.</small>
         </div>
@@ -100,7 +100,7 @@ export function VoiceStage ({ g, ch }) {
         <div class="tile person ${voice.speaking.has(k) ? 'speaking' : ''}" onClick=${() => toggle(k)}>
           ${cam
             ? html`<${Video} stream=${cam} fit="cover" />`
-            : html`<${Avatar} name=${name} color=${model.memberColor(g, k)} size=${84} speaking=${voice.speaking.has(k)} />`}
+            : html`<${Avatar} name=${name} color=${model.memberColor(g, k)} src=${model.memberAvatar(g, k)} size=${84} speaking=${voice.speaking.has(k)} />`}
           <div class="tile-label">
             ${st.deaf ? html`<${Icon} name="headphonesOff" size=${15} class="bad" />` : st.muted ? html`<${Icon} name="micOff" size=${15} class="bad" />` : null}
             ${me ? name + ' (you)' : name}

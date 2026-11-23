@@ -4,6 +4,9 @@ import { SCREEN_PRESETS } from '../lib/voice.js'
 import { Icon } from '../lib/icons.js'
 import { Avatar } from './chat.js'
 import { participantsOf } from './stage.js'
+import { NetworkHealth } from './nethealth.js'
+import { AvatarCropper, useImagePicker } from './avatar.js'
+import { restartForUpdate, updateStatusText } from './updates.js'
 
 function Modal ({ title, children, wide = false, onClose = () => model.closeModal() }) {
   useEffect(() => {
@@ -302,7 +305,7 @@ function MicMeter ({ deviceId }) {
 
 function SettingsModal ({ tab: initialTab = 'profile' }) {
   const [tab, setTab] = useState(initialTab)
-  const tabs = [['profile', 'My profile'], ['voice', 'Voice & audio'], ['screen', 'Screen share'], ['network', 'Network'], ['privacy', 'Privacy & security']]
+  const tabs = [['profile', 'My profile'], ['voice', 'Voice & audio'], ['screen', 'Screen share'], ['network', 'Network'], ['privacy', 'Privacy & security'], ['updates', 'Updates']]
   return html`
     <${Modal} title="Settings" wide>
       <div class="settings">
@@ -313,6 +316,7 @@ function SettingsModal ({ tab: initialTab = 'profile' }) {
           ${tab === 'screen' && html`<${ScreenSettings} />`}
           ${tab === 'network' && html`<${NetworkSettings} />`}
           ${tab === 'privacy' && html`<${PrivacySettings} />`}
+          ${tab === 'updates' && html`<${UpdateSettings} />`}
         </div>
       </div>
     <//>`
@@ -321,13 +325,27 @@ function SettingsModal ({ tab: initialTab = 'profile' }) {
 export function ProfileEditor ({ onSaved, cta = 'Save' }) {
   const [name, setName] = useState(model.me.name || '')
   const [color, setColor] = useState(model.me.color)
+  const [avatar, setAvatar] = useState(model.me.avatar || null)
+  const [cropping, setCropping] = useState(null)
+  const [fileInput, pickImage] = useImagePicker(setCropping)
   const save = async () => {
-    const me = await act(() => api.setProfile({ name: name.trim(), color }))
+    const me = await act(() => api.setProfile({ name: name.trim(), color, avatar }))
     if (me) { model.me = me; model.emit(); onSaved?.() }
+  }
+  if (cropping) {
+    return html`<${AvatarCropper} image=${cropping} onCancel=${() => setCropping(null)} onDone=${(url) => { setAvatar(url); setCropping(null) }} />`
   }
   return html`
     <div class="profile-editor">
-      <${Avatar} name=${name || '?'} color=${color} size=${72} />
+      ${fileInput}
+      <button class="avatar-pick" title="Change profile picture" onClick=${pickImage}>
+        <${Avatar} name=${name || '?'} color=${color} src=${avatar} size=${88} />
+        <span class="avatar-pick-overlay"><${Icon} name="camera" size=${24} /></span>
+      </button>
+      <div class="row center avatar-actions">
+        <button class="btn sm" onClick=${pickImage}>${avatar ? 'Change picture' : 'Upload picture'}</button>
+        ${avatar && html`<button class="btn sm" onClick=${() => setAvatar(null)}>Remove</button>`}
+      </div>
       <label>Display name<input value=${name} maxLength="32" autoFocus placeholder="What your friends call you" onInput=${(e) => setName(e.target.value)} onKeyDown=${(e) => e.key === 'Enter' && name.trim() && save()} /></label>
       <div class="swatches">${COLORS.map(c => html`<button key=${c} class=${c === color ? 'active' : ''} style=${{ background: c }} onClick=${() => setColor(c)} title=${c} />`)}</div>
       <button class="btn primary" disabled=${!name.trim()} onClick=${save}>${cta}</button>
@@ -419,13 +437,15 @@ function NetworkSettings () {
   return html`
     <h4>Connections</h4>
     <table class="peers">
-      <thead><tr><th>Friend</th><th>Path</th><th>Latency</th></tr></thead>
+      <thead><tr><th>Friend</th><th>Path</th><th>Latency</th><th>Version</th></tr></thead>
       <tbody>
-        ${!peers.length && html`<tr><td colspan="3" class="muted">No friends online right now.</td></tr>`}
-        ${peers.map(p => html`<tr key=${p.key}><td>${p.name}</td><td>${p.lan ? 'Same network (LAN)' : 'Direct over internet'} · ${p.family === 6 ? 'IPv6' : 'IPv4'}</td><td>${p.rtt != null ? p.rtt + ' ms' : '…'}</td></tr>`)}
+        ${!peers.length && html`<tr><td colspan="4" class="muted">No friends online right now.</td></tr>`}
+        ${peers.map(p => html`<tr key=${p.key}><td>${p.name}</td><td>${p.lan ? 'Same network (LAN)' : 'Direct over internet'} · ${p.family === 6 ? 'IPv6' : 'IPv4'}</td><td>${p.rtt != null ? p.rtt + ' ms' : '…'}</td><td class=${p.version && model.version && p.version !== model.version ? 'warn-text' : ''}>${p.version || 'older than 0.2'}</td></tr>`)}
       </tbody>
     </table>
     <p class="hint">Every connection is a direct, hole-punched UDP link. There is no relay fallback — that's the point.</p>
+    <h4>Connection check</h4>
+    <${NetworkHealth} />
     <h4>STUN servers (for calls)</h4>
     <textarea class="mono" rows="3" value=${stun} onInput=${(e) => setStun(e.target.value)} />
     <div class="row"><button class="btn" onClick=${() => saveSettings({ stunServers: stun.split('\n').map(s => s.trim()).filter(s => /^stuns?:/i.test(s)) }).then(() => model.toast('Saved — applies to the next call'))}>Save STUN servers</button></div>
@@ -439,6 +459,33 @@ function NetworkSettings () {
     <p class="hint">Keeping copies means friends can still get a file when the original sender is offline.</p>
     <${Toggle} label="Keep running in the tray when closed" hint="Stay online so friends can sync messages and files from you" checked=${st.closeToTray} onChange=${(v) => saveSettings({ closeToTray: v })} />
     <${Toggle} label="Desktop notifications" checked=${st.notifications} onChange=${(v) => saveSettings({ notifications: v })} />`
+}
+
+function UpdateSettings () {
+  const u = model.update
+  const [checking, setChecking] = useState(false)
+  const check = async () => {
+    setChecking(true)
+    await act(() => api.checkForUpdate())
+    setChecking(false)
+  }
+  const busy = checking || u?.status === 'checking' || u?.status === 'downloading' || u?.status === 'installing'
+  return html`
+    <h4>OpenDiscord ${model.version}</h4>
+    <div class="update-status ${u?.status || ''}">
+      <${Icon} name=${u?.status === 'ready' || u?.status === 'latest' ? 'check' : u?.status === 'error' ? 'signal' : 'download'} size=${16} />
+      <span>${updateStatusText(u)}</span>
+    </div>
+    ${u?.status === 'downloading' && html`<div class="progress update-progress"><i style=${{ width: (u.percent || 0) + '%' }} /></div>`}
+    <div class="row">
+      ${u?.status === 'ready'
+        ? html`<button class="btn primary" onClick=${restartForUpdate}>Restart to update</button>`
+        : html`<button class="btn" disabled=${!u?.supported || busy} onClick=${check}>${busy ? 'Checking…' : 'Check for updates'}</button>`}
+      ${u?.releasesUrl && html`<button class="btn" onClick=${() => api.openExternal(u.releasesUrl)}>What's new</button>`}
+    </div>
+    <${Toggle} label="Install updates automatically" hint="Checks GitHub every few hours, downloads new versions in the background and installs them the next time you restart" checked=${model.settings.autoUpdate !== false} onChange=${(v) => saveSettings({ autoUpdate: v })} />
+    <p class="hint">Updates are the releases published from the project's GitHub repository. Each download is checked against its published SHA-512 hash before it's installed. Checking for updates is the only time the app talks to a server other than the P2P network and STUN. Turn it off to avoid that; you can still check by hand.</p>
+    ${u?.portable && html`<p class="hint">You're running the portable .exe. The first update installs OpenDiscord on this PC (per user, no admin needed). After that, start it from the Start menu or desktop. Your groups and messages carry over.</p>`}`
 }
 
 function PrivacySettings () {

@@ -5,6 +5,8 @@ import { Icon } from './lib/icons.js'
 import { ChatView, Avatar } from './views/chat.js'
 import { VoiceStage, participantsOf, connLabel } from './views/stage.js'
 import { Modals, ProfileEditor } from './views/modals.js'
+import { NetworkHealth, useNetStatus, hasProblem } from './views/nethealth.js'
+import { initUpdates, UpdatePill } from './views/updates.js'
 
 // ---------------------------------------------------------------- shell
 
@@ -48,6 +50,7 @@ function TitleBar ({ g }) {
     <div class="titlebar ${model.platform}">
       <div class="brand"><span class="logo-dot" />OpenDiscord${model.profile && html`<span class="profile-tag">${model.profile}</span>`}</div>
       <div class="title-center">${g ? model.groupName(g) : ''}</div>
+      <div class="title-right"><${UpdatePill} /></div>
     </div>`
 }
 
@@ -150,7 +153,7 @@ function Sidebar ({ g, ch, stage }) {
                 const st = me ? voice.statePayload() : g.voice.get(k) || {}
                 return html`
                   <div key=${k} class="voice-user ${voice.speaking.has(k) ? 'speaking' : ''}">
-                    <${Avatar} name=${model.memberName(g, k)} color=${model.memberColor(g, k)} size=${22} speaking=${voice.speaking.has(k)} />
+                    <${Avatar} name=${model.memberName(g, k)} color=${model.memberColor(g, k)} src=${model.memberAvatar(g, k)} size=${22} speaking=${voice.speaking.has(k)} />
                     <span class="vu-name">${model.memberName(g, k)}</span>
                     ${st.screen && html`<span class="live">LIVE</span>`}
                     ${st.cam && html`<${Icon} name="camera" size=${14} class="dim" />`}
@@ -195,7 +198,7 @@ function UserPanel () {
   const me = model.me
   return html`
     <div class="user-panel">
-      <${Avatar} name=${me.name} color=${me.color} size=${34} dot="online" speaking=${voice.speaking.has(me.key)} />
+      <${Avatar} name=${me.name} color=${me.color} src=${me.avatar} size=${34} dot="online" speaking=${voice.speaking.has(me.key)} />
       <div class="up-name" title=${'Public key ' + me.key}><b>${me.name}</b><small>${shortKey(me.key)}</small></div>
       <button class="icon-btn ${voice.muted ? 'bad' : ''}" title=${voice.muted ? 'Unmute' : 'Mute'} onClick=${() => voice.toggleMute()}><${Icon} name=${voice.muted ? 'micOff' : 'mic'} size=${18} /></button>
       <button class="icon-btn ${voice.deafened ? 'bad' : ''}" title=${voice.deafened ? 'Undeafen' : 'Deafen'} onClick=${() => voice.toggleDeafen()}><${Icon} name=${voice.deafened ? 'headphonesOff' : 'headphones'} size=${18} /></button>
@@ -225,7 +228,7 @@ function Members ({ g }) {
       : me ? 'You' : isOnline ? (info?.rtt != null ? `${info.rtt} ms · ${info.lan ? 'LAN' : 'direct'}` : 'Online') : 'Offline'
     return html`
       <div key=${k} class="member ${isOnline ? '' : 'off'}" title=${`${model.memberName(g, k)}\nKey ${k}`}>
-        <${Avatar} name=${model.memberName(g, k)} color=${model.memberColor(g, k)} size=${32} dot=${isOnline ? 'online' : 'offline'} speaking=${voice.speaking.has(k)} />
+        <${Avatar} name=${model.memberName(g, k)} color=${model.memberColor(g, k)} src=${model.memberAvatar(g, k)} size=${32} dot=${isOnline ? 'online' : 'offline'} speaking=${voice.speaking.has(k)} />
         <div><b style=${{ color: isOnline ? model.memberColor(g, k) : undefined }}>${model.memberName(g, k)}</b><small>${sub}</small></div>
       </div>`
   }
@@ -235,6 +238,7 @@ function Members ({ g }) {
       ${online.map(m => row(m, true))}
       ${offline.length > 0 && html`<div class="section-head"><span>Offline — ${offline.length}</span></div>`}
       ${offline.map(m => row(m, false))}
+      ${g.online.size === 0 && html`<${ConnectionHint} g=${g} />`}
       <div class="p2p-note"><${Icon} name="shield" size=${14} /><span>Direct P2P · end-to-end encrypted · no servers</span></div>
     </aside>`
 }
@@ -248,7 +252,21 @@ function Syncing ({ g }) {
       <p>${online
         ? 'Receiving channels and messages directly from your friends.'
         : `You've joined ${model.groupName(g)}. There's no server holding the history, so it will appear as soon as someone in the group is online.`}</p>
+      ${!online && html`<${NetworkHealth} gid=${g.id} />`}
     </div>`
+}
+
+// Shown under the member list when nobody else is connected, so "where are my friends?"
+// has an answer instead of an empty list.
+function ConnectionHint ({ g }) {
+  const st = useNetStatus(5000)
+  const gs = st?.groups?.[g.id]
+  const bad = hasProblem(st) || (gs && gs.found > gs.connected)
+  return html`
+    <button class="conn-hint ${bad ? 'bad' : ''}" onClick=${() => model.openModal('settings', { tab: 'network' })}>
+      <${Icon} name="signal" size=${14} />
+      <span>${!st ? 'Checking connection…' : bad ? 'Connection problem — see why' : "Can't see your friends? Check connection"}</span>
+    </button>`
 }
 
 function Welcome () {
@@ -288,6 +306,7 @@ async function boot () {
   model.settings = init.settings
   model.platform = init.platform
   model.profile = init.profile
+  model.version = init.version
   document.body.classList.add('platform-' + init.platform)
   for (const g of init.groups) model.addGroup(g)
   for (const p of init.peers) for (const gid of p.groups) model.peerJoin(gid, p.key, p)
@@ -307,6 +326,7 @@ async function boot () {
     voice.onPeerOffline(gid, key)
   })
   api.on('peer-update', (info) => model.peerUpdate(info))
+  initUpdates()
   api.on('eph', (gid, from, d) => {
     switch (d.type) {
       case 'voice':

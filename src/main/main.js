@@ -8,6 +8,7 @@ const fs = require('fs')
 const { Readable } = require('stream')
 const { Store } = require('./store')
 const { Network, importBlobFile, importBlobBuffer } = require('./network')
+const { Updater } = require('./updater')
 
 // --profile=name runs an isolated instance (own identity + data). Handy for testing
 // several "friends" on one PC.
@@ -42,6 +43,7 @@ let win = null
 let tray = null
 let store = null
 let net = null
+let updater = null
 let quitting = false
 let pendingScreen = null
 
@@ -70,8 +72,11 @@ async function boot () {
   app.setAppUserModelId('app.opendiscord' + (profile ? '.' + profile : ''))
   store = new Store(app.getPath('userData')).load()
   net = new Network(store, {
-    bootstrap: process.env.OD_BOOTSTRAP ? process.env.OD_BOOTSTRAP.split(',') : undefined
+    bootstrap: process.env.OD_BOOTSTRAP ? process.env.OD_BOOTSTRAP.split(',') : undefined,
+    appVersion: app.getVersion()
   })
+  updater = new Updater({ isEnabled: () => store.settings.autoUpdate !== false })
+  updater.on('state', (st) => send('update', st))
 
   registerProtocols()
   registerMediaHandlers()
@@ -79,6 +84,7 @@ async function boot () {
   wireNetwork()
   createWindow()
   createTray()
+  updater.start()
   await net.start()
 }
 
@@ -247,7 +253,7 @@ function registerIpc () {
   handle('profile:set', (p) => {
     const me = store.setProfile(p || {})
     const ops = []
-    for (const g of store.groups.values()) ops.push(appendAndBroadcast(g.id, 'profile', { name: me.name, color: me.color }))
+    for (const g of store.groups.values()) ops.push(appendAndBroadcast(g.id, 'profile', store.profileData()))
     for (const op of ops) send('ops', op.g, [op])
     return me
   })
@@ -324,6 +330,13 @@ function registerIpc () {
     setTimeout(() => { if (pendingScreen && pendingScreen.id === id) pendingScreen = null }, 15000)
     return true
   })
+
+  handle('net:status', async () => ({ ...(await net.diagnostics()), version: app.getVersion(), platform: process.platform }))
+  handle('net:retry', () => net.retry())
+
+  handle('update:state', () => updater.state)
+  handle('update:check', () => updater.check())
+  handle('update:install', () => updater.install())
 
   handle('shell:open', (url) => { if (/^https?:\/\//i.test(url)) shell.openExternal(url) })
   handle('clipboard:write', (text) => { clipboard.writeText(String(text)); return true })

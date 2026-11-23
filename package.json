@@ -1,7 +1,7 @@
 {
   "name": "opendiscord",
   "productName": "OpenDiscord",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Serverless, end-to-end encrypted P2P chat, voice and screen sharing for a small group of friends",
   "main": "src/main/main.js",
   "private": true,
@@ -13,12 +13,15 @@
     "test": "node --test test/core.test.js",
     "test:e2e": "node test/e2e.mjs",
     "icon": "node scripts/make-icon.js",
-    "dist": "electron-builder --win",
-    "dist:mac": "electron-builder --mac",
-    "dist:linux": "electron-builder --linux"
+    "dist": "electron-builder --win --publish never",
+    "dist:mac": "electron-builder --mac --publish never",
+    "dist:linux": "electron-builder --linux --publish never",
+    "test:update": "node test/update.e2e.mjs",
+    "next-version": "node scripts/next-version.js"
   },
   "dependencies": {
     "b4a": "^1.9.0",
+    "electron-updater": "^6.8.11",
     "htm": "^3.1.1",
     "hypercore-crypto": "^3.7.0",
     "hyperswarm": "^4.17.2"
@@ -55,10 +58,11 @@
     },
     "nsis": {
       "oneClick": true,
-      "perMachine": false
+      "perMachine": false,
+      "artifactName": "OpenDiscord-Setup-${version}.${ext}"
     },
     "portable": {
-      "artifactName": "${productName}-${version}-portable.exe"
+      "artifactName": "OpenDiscord-${version}-portable.${ext}"
     },
     "mac": {
       "target": [
@@ -75,6 +79,12 @@
         "AppImage"
       ],
       "category": "Network"
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "Save-Vision",
+      "repo": "opencord",
+      "releaseType": "release"
     }
   }
 }
