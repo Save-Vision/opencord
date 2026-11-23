@@ -7,6 +7,8 @@
 //   0 mic audio · 1 screen video · 2 screen audio · 3 camera video
 // Starting/stopping a share is just replaceTrack(), no renegotiation round-trip.
 
+import { getMic, stopMic, isDenoised } from './denoise.js'
+
 const SLOTS = [
   { name: 'mic', kind: 'audio' },
   { name: 'screen', kind: 'video' },
@@ -101,7 +103,7 @@ let toneCtx = null
 export function playTone (kind) {
   try {
     toneCtx = toneCtx || new AudioContext()
-    const seq = { join: [523, 784], leave: [784, 523], mute: [440], unmute: [660], connect: [660, 880] }[kind] || [600]
+    const seq = { join: [523, 784], leave: [784, 523], mute: [440], unmute: [660], connect: [660, 880], ring: [784, 988, 784, 988] }[kind] || [600]
     const t0 = toneCtx.currentTime
     seq.forEach((f, i) => {
       const o = toneCtx.createOscillator()
@@ -166,7 +168,7 @@ export class Voice {
       this.micError = err.name === 'NotAllowedError' ? 'Microphone permission denied' : 'No microphone available (' + err.message + ')'
       this.model.toast(this.micError + ' — you joined listen-only', 'error')
     }
-    if (this.active?.sid !== sid) { mic?.getTracks().forEach(t => t.stop()); return } // left meanwhile
+    if (this.active?.sid !== sid) { stopMic(mic); return } // left meanwhile
     this.local.mic = mic
     this._applyMute()
     for (const call of this.calls.values()) this._attachLocalTracks(call)
@@ -187,6 +189,7 @@ export class Voice {
     if (!this.active) return
     const { gid } = this.active
     for (const call of [...this.calls.values()]) this._closeCall(call)
+    stopMic(this.local.mic)
     for (const kind of ['mic', 'screen', 'cam']) {
       this.local[kind]?.getTracks().forEach(t => t.stop())
       this.local[kind] = null
@@ -210,7 +213,8 @@ export class Voice {
       type: 'voice',
       ch: this.active.ch,
       sid: this.active.sid,
-      muted: this.muted || !this.local.mic,
+      muted: this.muted || !this.local.mic || this.serverMuted,
+      smute: this.serverMuted,
       deaf: this.deafened,
       screen: !!this.local.screen,
       screenLabel: this.screenOpts ? SCREEN_PRESETS[this.screenOpts.preset]?.label : null,
@@ -239,6 +243,47 @@ export class Voice {
       playTone('leave')
     }
     this.model.emit()
+  }
+
+  // A moderator moved us to another voice channel (ch) or disconnected us (ch = null).
+  onMove (gid, from, d) {
+    const g = this.model.groups.get(gid)
+    if (!g || !this.active || this.active.gid !== gid || !this.model.canModerate(g, from, this.myKey)) return
+    const by = this.model.memberName(g, from)
+    if (d.ch == null) {
+      this.leave()
+      this.model.toast(by + ' disconnected you from voice')
+      return
+    }
+    const ch = g.channels.get(d.ch)
+    if (!ch || ch.deleted || ch.kind !== 'voice' || this.active.ch === ch.id) return
+    const viewing = this.model.ui.stage?.gid === gid
+    this.join(gid, ch.id).then(() => {
+      if (viewing) { this.model.ui.stage = { gid, ch: ch.id }; this.model.emit() }
+    })
+    this.model.toast(by + ' moved you to ' + ch.name)
+  }
+
+  // Server mutes, local mutes or roles changed: re-apply what we send and what we play.
+  onModeration () {
+    if (!this.active) return
+    const was = this._wasServerMuted
+    this._wasServerMuted = this.serverMuted
+    this._applyMute()
+    this.applyOutputDevice()
+    if (was !== undefined && was !== this.serverMuted) {
+      this._broadcastState()
+      playTone(this.serverMuted ? 'mute' : 'unmute')
+      this.model.toast(this.serverMuted ? 'A moderator muted you' : 'A moderator unmuted you')
+    }
+  }
+
+  // true while the mic runs through RNNoise (false if it fell back to Chromium's suppression)
+  get denoised () { return isDenoised(this.local.mic) }
+
+  get serverMuted () {
+    if (!this.active) return false
+    return this.model.isServerMuted(this.model.groups.get(this.active.gid), this.myKey)
   }
 
   onPeerOnline (gid, key) {
@@ -443,18 +488,13 @@ export class Voice {
 
   // ---------- local media ----------
 
-  async _getMic () {
-    const a = this.settings.audio
-    return navigator.mediaDevices.getUserMedia({
-      audio: {
-        deviceId: a.inputId && a.inputId !== 'default' ? { exact: a.inputId } : undefined,
-        echoCancellation: a.echoCancellation,
-        noiseSuppression: a.noiseSuppression,
-        autoGainControl: a.autoGainControl,
-        channelCount: 1,
-        sampleRate: 48000
-      },
-      video: false
+  _getMic () {
+    return getMic(this.settings.audio, {
+      onFallback: (err) => {
+        if (this._warnedDenoise) return
+        this._warnedDenoise = true
+        this.model.toast('AI noise suppression could not start (' + err.message + '). Using the standard filter.', 'error')
+      }
     })
   }
 
@@ -467,7 +507,7 @@ export class Voice {
       this.model.toast('Could not open microphone: ' + err.message, 'error')
       return
     }
-    old?.getTracks().forEach(t => t.stop())
+    stopMic(old)
     const m = this.meters.get(this.myKey)
     if (m) { m.src.disconnect(); this.meters.delete(this.myKey) }
     this._meter(this.myKey, this.local.mic)
@@ -483,7 +523,10 @@ export class Voice {
   _applyOutput (key, el) {
     const vol = this.settings.volumes?.[key]
     el.volume = Math.max(0, Math.min(1, vol == null ? 1 : vol))
-    el.muted = this.deafened
+    // Muted for me, or muted by a moderator: every listener enforces a server mute itself, so
+    // it holds even against a modified client.
+    const g = this.active && this.model.groups.get(this.active.gid)
+    el.muted = this.deafened || !!this.settings.localMutes?.[key] || (!!g && this.model.isServerMuted(g, key))
     const out = this.settings.audio.outputId
     if (el.setSinkId && out) el.setSinkId(out === 'default' ? '' : out).catch(() => {})
   }
@@ -495,11 +538,12 @@ export class Voice {
 
   _applyMute () {
     const t = this.local.mic?.getAudioTracks()[0]
-    if (t) t.enabled = !this.muted && !this.deafened
+    if (t) t.enabled = !this.muted && !this.deafened && !this.serverMuted
   }
 
   toggleMute () {
     if (this.deafened) { this.toggleDeafen(); return }
+    if (this.muted && this.serverMuted) { this.model.toast('A moderator muted you. Ask them to unmute you.', 'error'); return }
     this.muted = !this.muted
     this._applyMute()
     this._broadcastState()
@@ -511,7 +555,7 @@ export class Voice {
     this.deafened = !this.deafened
     if (this.deafened) { this.mutedBeforeDeafen = this.muted; this.muted = true } else { this.muted = this.mutedBeforeDeafen }
     this._applyMute()
-    for (const call of this.calls.values()) for (const el of Object.values(call.audioEls)) el.muted = this.deafened
+    this.applyOutputDevice()
     this._broadcastState()
     playTone(this.deafened ? 'mute' : 'unmute')
     this.model.emit()

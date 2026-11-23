@@ -1,8 +1,10 @@
 import { html, useState, useEffect, useRef } from '../vendor/preact-htm.js'
-import { api, model, voice, act, append, rid, saveSettings, blobUrl, COLORS, fmtRate } from '../lib/core.js'
+import { api, model, voice, act, append, rid, saveSettings, blobUrl, COLORS, fmtRate, fmtBytes, initials } from '../lib/core.js'
 import { SCREEN_PRESETS } from '../lib/voice.js'
+import { getMic, stopMic, noiseMode, isDenoised } from '../lib/denoise.js'
+import { extOf } from '../lib/highlight.js'
 import { Icon } from '../lib/icons.js'
-import { Avatar } from './chat.js'
+import { Avatar, CodeView, MarkdownView, useBlobText } from './chat.js'
 import { participantsOf } from './stage.js'
 import { NetworkHealth } from './nethealth.js'
 import { AvatarCropper, useImagePicker } from './avatar.js'
@@ -34,7 +36,9 @@ export function Modals () {
     confirm: ConfirmModal,
     settings: SettingsModal,
     screen: ScreenPickerModal,
-    image: ImageModal
+    image: ImageModal,
+    groupIcon: GroupIconModal,
+    textFile: TextFileModal
   }[m.name]
   return C ? html`<${C} ...${m.props} />` : null
 }
@@ -82,7 +86,9 @@ export function AddGroupModal ({ tab: initialTab = 'create' }) {
         : html`
           <div class="modal-body">
             <label>Invite code<textarea class="mono" rows="3" value=${code} autoFocus placeholder="OD1-…" onInput=${(e) => setCode(e.target.value.trim())} /></label>
-            <p class="hint">Ask a friend for the code (Group menu → Invite people).</p>
+            ${code.startsWith('ODF1-')
+              ? html`<p class="hint warn-text">That's a friend code, not a group invite. Add it under Friends (the top button in the left bar).</p>`
+              : html`<p class="hint">Ask a friend for the code (Group menu → Invite people).</p>`}
           </div>
           <footer><button class="btn primary" disabled=${busy || !code.startsWith('OD1-')} onClick=${join}>Join group</button></footer>`}
     <//>`
@@ -169,6 +175,64 @@ function ConfirmModal ({ title, body, confirm = 'OK', danger = false, onConfirm 
         <div class="spacer" />
         <button class="btn" onClick=${() => model.closeModal()}>Cancel</button>
         <button class="btn ${danger ? 'danger' : 'primary'}" autoFocus onClick=${() => { model.closeModal(); onConfirm() }}>${confirm}</button>
+      </footer>
+    <//>`
+}
+
+function GroupIconModal ({ gid }) {
+  const g = model.groups.get(gid)
+  const [cropping, setCropping] = useState(null)
+  const [fileInput, pickImage] = useImagePicker(setCropping)
+  if (!g) return null
+  const save = async (icon) => {
+    const ok = await act(() => append(gid, 'group.icon', { icon }), 'Could not change the picture')
+    if (!ok) return
+    model.toast(icon ? 'Group picture updated' : 'Group picture removed')
+    model.closeModal()
+  }
+  return html`
+    <${Modal} title="Group picture">
+      <div class="modal-body">
+        ${fileInput}
+        ${cropping
+          ? html`<${AvatarCropper} image=${cropping} onCancel=${() => setCropping(null)} onDone=${(url) => { setCropping(null); save(url) }} />`
+          : html`
+            <div class="profile-editor">
+              <button class="avatar-pick" title="Upload a picture" onClick=${pickImage}>
+                ${g.icon ? html`<img class="group-icon big" src=${g.icon} alt="" />` : html`<div class="group-icon big placeholder">${initials(model.groupName(g))}</div>`}
+                <span class="avatar-pick-overlay"><${Icon} name="camera" size=${24} /></span>
+              </button>
+              <div class="row center avatar-actions">
+                <button class="btn sm" onClick=${pickImage}>${g.icon ? 'Change picture' : 'Upload picture'}</button>
+                ${g.icon && html`<button class="btn sm" onClick=${() => save(null)}>Remove</button>`}
+              </div>
+              <p class="hint">Everyone in ${model.groupName(g)} sees it. It syncs with the history, so friends who are offline get it later.</p>
+            </div>`}
+      </div>
+    <//>`
+}
+
+function TextFileModal ({ a }) {
+  const have = model.blobs.get(a.h)?.state === 'have'
+  const text = useBlobText(a, have)
+  const ext = extOf(a.n)
+  const md = ext === 'md' || ext === 'markdown'
+  const [source, setSource] = useState(false)
+  return html`
+    <${Modal} title=${a.n} wide>
+      ${md && html`
+        <div class="tabs">
+          <button class=${!source ? 'active' : ''} onClick=${() => setSource(false)}>Preview</button>
+          <button class=${source ? 'active' : ''} onClick=${() => setSource(true)}>Source</button>
+        </div>`}
+      <div class="modal-body text-file-body">
+        ${text == null ? html`<p class="muted">Loading…</p>` : md && !source ? html`<${MarkdownView} text=${text} />` : html`<${CodeView} text=${text} ext=${md ? 'md' : ext} />`}
+      </div>
+      <footer>
+        <button class="btn" disabled=${text == null} onClick=${() => { api.copy(text); model.toast('Copied to clipboard') }}><${Icon} name="copy" size=${16} /> Copy text</button>
+        <div class="spacer" />
+        <button class="btn" onClick=${() => act(() => api.saveBlob(a.h, a.n))}><${Icon} name="download" size=${16} /> Save</button>
+        <button class="btn primary" onClick=${() => model.closeModal()}>Close</button>
       </footer>
     <//>`
 }
@@ -272,14 +336,22 @@ function Toggle ({ checked, onChange, label, hint }) {
     </label>`
 }
 
-function MicMeter ({ deviceId }) {
+// Tests the microphone exactly as a call would send it (including the noise filter), and can
+// play it back so you can hear what your friends hear.
+function MicMeter ({ audio }) {
   const [level, setLevel] = useState(0)
   const [on, setOn] = useState(false)
+  const [hear, setHear] = useState(false)
+  const [ai, setAi] = useState(null)
+  const out = useRef()
   useEffect(() => {
     if (!on) return
     let stream; let ctx; let raf
-    navigator.mediaDevices.getUserMedia({ audio: { deviceId: deviceId && deviceId !== 'default' ? { exact: deviceId } : undefined } }).then((s) => {
+    let alive = true
+    getMic(audio, { onFallback: (e) => model.toast('AI noise suppression could not start: ' + e.message, 'error') }).then((s) => {
+      if (!alive) { stopMic(s); return }
       stream = s
+      setAi(isDenoised(s))
       ctx = new AudioContext()
       const an = ctx.createAnalyser()
       an.fftSize = 512
@@ -293,19 +365,40 @@ function MicMeter ({ deviceId }) {
         raf = requestAnimationFrame(tick)
       }
       tick()
+      if (out.current) {
+        out.current.srcObject = s
+        if (out.current.setSinkId && audio.outputId) out.current.setSinkId(audio.outputId === 'default' ? '' : audio.outputId).catch(() => {})
+      }
     }).catch(e => { model.toast('Mic test failed: ' + e.message, 'error'); setOn(false) })
-    return () => { cancelAnimationFrame(raf); stream?.getTracks().forEach(t => t.stop()); ctx?.close() }
-  }, [on, deviceId])
+    return () => {
+      alive = false
+      cancelAnimationFrame(raf)
+      stopMic(stream)
+      ctx?.close()
+      if (out.current) out.current.srcObject = null
+    }
+  }, [on, audio.inputId, audio.noiseMode, audio.echoCancellation, audio.autoGainControl])
+  useEffect(() => {
+    const el = out.current
+    if (!el) return
+    el.muted = !hear
+    if (hear) el.play().catch(() => {})
+  }, [hear, on])
   return html`
     <div class="mic-test">
       <button class="btn" onClick=${() => setOn(!on)}>${on ? 'Stop test' : 'Test microphone'}</button>
       <div class="meter"><i style=${{ width: (on ? level * 100 : 0) + '%' }} /></div>
-    </div>`
+      ${on && html`<label class="check" title="Use headphones, or you'll get feedback"><input type="checkbox" checked=${hear} onChange=${(e) => setHear(e.target.checked)} /> Hear yourself</label>`}
+      <audio ref=${out} autoplay muted />
+    </div>
+    ${on && ai !== null && html`<p class="hint">${ai
+      ? 'This is your mic after AI noise suppression. Type, or let a fan run: the meter should stay low until you speak. Turn on "Hear yourself" (with headphones) to listen.'
+      : 'This is your mic as your friends hear it.'}</p>`}`
 }
 
 function SettingsModal ({ tab: initialTab = 'profile' }) {
   const [tab, setTab] = useState(initialTab)
-  const tabs = [['profile', 'My profile'], ['voice', 'Voice & audio'], ['screen', 'Screen share'], ['network', 'Network'], ['privacy', 'Privacy & security'], ['updates', 'Updates']]
+  const tabs = [['profile', 'My profile'], ['voice', 'Voice & audio'], ['screen', 'Screen share'], ['network', 'Network'], ['storage', 'Storage'], ['privacy', 'Privacy & security'], ['updates', 'Updates']]
   return html`
     <${Modal} title="Settings" wide>
       <div class="settings">
@@ -315,6 +408,7 @@ function SettingsModal ({ tab: initialTab = 'profile' }) {
           ${tab === 'voice' && html`<${VoiceSettings} />`}
           ${tab === 'screen' && html`<${ScreenSettings} />`}
           ${tab === 'network' && html`<${NetworkSettings} />`}
+          ${tab === 'storage' && html`<${StorageSettings} />`}
           ${tab === 'privacy' && html`<${PrivacySettings} />`}
           ${tab === 'updates' && html`<${UpdateSettings} />`}
         </div>
@@ -386,8 +480,14 @@ function VoiceSettings () {
         </select>
       </label>
     </div>
-    <${MicMeter} deviceId=${a.inputId} />
-    <${Toggle} label="Noise suppression" hint="Filters keyboard and fan noise" checked=${a.noiseSuppression} onChange=${(v) => set({ noiseSuppression: v }, true)} />
+    <label>Noise suppression
+      <select value=${noiseMode(a)} onChange=${(e) => set({ noiseMode: e.target.value, noiseSuppression: e.target.value !== 'off' }, true)}>
+        <option value="ai">AI (RNNoise): removes fans, keyboard clicks, hiss and hum</option>
+        <option value="standard">Standard: the browser's built-in filter (lighter)</option>
+        <option value="off">Off: send the microphone as it is</option>
+      </select>
+    </label>
+    <${MicMeter} audio=${a} />
     <${Toggle} label="Echo cancellation" hint="Needed if you use speakers instead of headphones" checked=${a.echoCancellation} onChange=${(v) => set({ echoCancellation: v }, true)} />
     <${Toggle} label="Automatic gain control" hint="Evens out your volume" checked=${a.autoGainControl} onChange=${(v) => set({ autoGainControl: v }, true)} />
     <label>Voice quality (Opus bitrate)
@@ -461,6 +561,65 @@ function NetworkSettings () {
     <${Toggle} label="Desktop notifications" checked=${st.notifications} onChange=${(v) => saveSettings({ notifications: v })} />`
 }
 
+function StorageSettings () {
+  const [info, setInfo] = useState(null)
+  const [pending, setPending] = useState(null) // { dir, existing } waiting for confirmation
+  const [busy, setBusy] = useState(false)
+  useEffect(() => { api.storageInfo().then(setInfo, (e) => model.toast('Could not read the data folder: ' + e.message, 'error')) }, [])
+  const choose = async (picked) => {
+    const t = await act(() => api.checkStorage(picked))
+    if (t) setPending(t)
+  }
+  const pick = async () => {
+    const picked = await act(() => api.pickStorage())
+    if (picked) choose(picked)
+  }
+  const go = async (useExisting) => {
+    setBusy(true)
+    if (voice.active) voice.leave(true)
+    const ok = await act(() => api.moveStorage(pending.dir, useExisting))
+    if (!ok) setBusy(false) // otherwise the app restarts
+  }
+  const isDefault = info && info.dir.toLowerCase() === info.defaultDir.toLowerCase()
+  return html`
+    <h4>Data folder</h4>
+    <p class="hint">Your identity (your key pair), groups, messages and the files you've received live here. Pick a bigger drive if you share lots of large files.</p>
+    <div class="invite-box">
+      <code class="mono">${info ? info.dir : '…'}</code>
+      <button class="btn" onClick=${() => api.openStorage()}><${Icon} name="folder" size=${16} /> Open</button>
+    </div>
+    <p class="hint">${info ? `${fmtBytes(info.size)} used${isDefault ? ' · default location' : ''}` : ''}</p>
+    ${info?.locked
+      ? html`<p class="hint warn-text">This folder is set by the OD_DATA_DIR environment variable, so it can't be changed here.</p>`
+      : html`
+        <div class="row">
+          <button class="btn" disabled=${!info || busy} onClick=${pick}>Change folder…</button>
+          ${info && !isDefault && html`<button class="btn" disabled=${busy} onClick=${() => choose(null)}>Move back to the default folder</button>`}
+        </div>`}
+    ${pending && html`
+      <div class="callout ${pending.existing ? 'warn' : ''}">
+        <${Icon} name="folder" size=${16} />
+        <div>
+          ${pending.existing
+            ? html`
+              <p><b>${pending.dir}</b> already holds OpenDiscord data, maybe another identity or an older copy.</p>
+              <div class="row">
+                <button class="btn primary" disabled=${busy} onClick=${() => go(true)}>Switch to the data that's there</button>
+                <button class="btn danger" disabled=${busy} onClick=${() => go(false)}>Replace it with my current data</button>
+                <button class="btn" disabled=${busy} onClick=${() => setPending(null)}>Cancel</button>
+              </div>
+              <p class="hint">Switching leaves your current data where it is. Replacing deletes the data in the new folder first.</p>`
+            : html`
+              <p>OpenDiscord restarts and moves your data${info ? ` (${fmtBytes(info.size)})` : ''} to <b>${pending.dir}</b>.${voice.active ? ' This ends your call.' : ''}</p>
+              <div class="row">
+                <button class="btn primary" disabled=${busy} onClick=${() => go(false)}>${busy ? 'Restarting…' : 'Move and restart'}</button>
+                <button class="btn" disabled=${busy} onClick=${() => setPending(null)}>Cancel</button>
+              </div>`}
+        </div>
+      </div>`}
+    <p class="hint">The move happens on the next start, before anything opens the files. If the folder is on a drive that's missing later, OpenDiscord doesn't start with an empty profile. It asks you to reconnect the drive instead.</p>`
+}
+
 function UpdateSettings () {
   const u = model.update
   const [checking, setChecking] = useState(false)
@@ -499,6 +658,8 @@ function PrivacySettings () {
       <li><${Icon} name="speaker" size=${18} /><div><b>Calls & screen share</b><small>WebRTC DTLS-SRTP, directly between you. The DTLS fingerprints are exchanged over the authenticated channel, so no one can man-in-the-middle a call.</small></div></li>
       <li><${Icon} name="file" size=${18} /><div><b>On disk</b><small>History is stored unencrypted in your user profile folder, like most desktop apps. Protect your device with disk encryption (BitLocker/FileVault).</small></div></li>
     </ul>
+    <h4>Link previews</h4>
+    <${Toggle} label="Show previews for links I send" hint="Your app loads the page once when you send the message and attaches a small preview. Friends' apps never contact the site, so they don't reveal their IP address to it." checked=${model.settings.linkPreviews !== false} onChange=${(v) => saveSettings({ linkPreviews: v })} />
     <h4>Your public key</h4>
     <div class="invite-box"><code class="mono">${key}</code><button class="btn" onClick=${() => api.copy(key)}><${Icon} name="copy" size=${16} /> Copy</button></div>
     <p class="hint">Friends can compare the first characters with what they see for you in the member list tooltip to be sure it's really you.</p>`

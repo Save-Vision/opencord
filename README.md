@@ -11,11 +11,16 @@ directly between your computers, encrypted end to end.
 | | OpenDiscord | Discord (free tier, as of 2025) |
 |---|---|---|
 | Text channels, replies, edits, reactions, @mentions, markdown | ✅ | ✅ |
+| Emoji picker, `:shortcodes:`, pinned messages, link previews | ✅ | ✅ |
+| Friends, private chats and private calls | ✅ | ✅ |
 | File sharing | ✅ any size, sent directly | 10 MB limit |
+| Code and markdown files | ✅ previewed with syntax highlighting | ✅ |
 | Voice channels | ✅ Opus up to 192 kbps | 64–96 kbps |
-| Screen share | ✅ up to 4K · 60 fps, GPU-encoded (H.264/HEVC/AV1) | 720p · 30 fps |
+| Noise suppression | ✅ RNNoise (AI), runs on your PC | ✅ Krisp |
+| Screen share | ✅ up to 4K · 60 fps, GPU-encoded (H.264/HEVC/AV1), zoomable | 720p · 30 fps |
 | Webcam | ✅ | ✅ |
-| Profile pictures | ✅ synced with your profile, visible offline | ✅ |
+| Moderation: kick, admins, mute for everyone, move between channels | ✅ | ✅ |
+| Profile and group pictures | ✅ synced, visible offline | ✅ |
 | Updates | ✅ automatic, from this repo's GitHub releases | ✅ |
 | Where your data lives | only on your three PCs | Discord's servers |
 | Encryption | end to end, always | calls only; messages readable by Discord |
@@ -45,12 +50,24 @@ Then:
 5. If you still don't see each other after a minute, see
    [If you can't see each other](#if-you-cant-see-each-other). (VPNs are the usual cause.)
 
+**Friends and private chats:** click the people icon at the top of the left bar → **Add friend**.
+Copy your friend code (`ODF1-…`) and send it to your friend, or paste theirs. Their app gets the
+request directly from yours as soon as you're both online. Once they accept, you have a private
+chat with a call button. You can also add anyone you share a group with: click their name.
+
 Tips:
 - Closing the window keeps the app running in the tray, so friends can sync messages from you.
   Quit from the tray icon. (Settings → Network to turn this off.)
 - `Ctrl+Shift+F9` mute / `Ctrl+Shift+F10` deafen work globally while you're in a call.
-- Hover a person's tile in a call for a per-friend volume slider.
-- Double-click a screen share (or the ⤢ button) for fullscreen.
+- **Right-click a person** (member list, call tile, voice channel) for their volume, *Mute for
+  me*, and, if you're the group's owner or an admin: *Mute for everyone*, *Move to* another voice
+  channel, *Disconnect* and *Kick*. The owner can make people admins there.
+- Screen shares: scroll to **zoom** in (up to 8×) and drag to pan. Double-click (or ⤢) for fullscreen.
+- Type `:` and a name (`:fire`) for emoji. Hover a message to **pin** it; pins are in the 📌 menu.
+- Settings → Voice & audio → **Noise suppression**: *AI (RNNoise)* (default) removes fans, keyboard
+  clicks and hum. Use *Hear yourself* next to the mic meter to check it.
+- Settings → **Storage** moves your data (identity, history, files) to another folder or drive.
+- Settings → Privacy → **Link previews** turns off fetching previews for links you send.
 
 ## How it works
 
@@ -85,6 +102,21 @@ Tips:
   DTLS-SRTP encrypted end to end. The DTLS fingerprints travel over the authenticated Hyperswarm
   link, so a call can't be man-in-the-middled. Starting a screen share doesn't renegotiate; the
   stream just swaps into a pre-negotiated slot.
+- **Private chats** are two-person groups whose key both of you derive from an X25519 key exchange
+  between your identity keys. Nobody else can compute it, and both apps refuse anyone but the two
+  of you even if the key leaked. A friend code is just your public key and name, so it's safe to
+  share. Every app listens on its own key, which is how a friend request reaches you directly.
+- **Roles and kicking:** whoever creates a group is its owner (pinned by the first, signed op).
+  The owner can make members admins. Owner and admins can kick, mute for everyone and move people.
+  A **kick rotates the group key**: the new key is sealed to each remaining member's identity key
+  inside the signed kick op, so the kicked person can't read anything sent afterwards and their
+  copy of the invite stops working. Everyone's app checks who may moderate whom, so a member
+  can't fake a kick.
+- **Link previews** are made by the *sender's* app (title, description, a small thumbnail) and
+  sent as part of the signed message. Friends' apps never load anything from the web: they show
+  the preview the sender attached. Pictures inside markdown files aren't loaded either.
+- **Noise suppression** runs [RNNoise](https://github.com/xiph/rnnoise) (a small neural network)
+  in an AudioWorklet on your PC, before your voice is encoded.
 
 ### "Truly P2P": what does touch a third party?
 
@@ -96,6 +128,9 @@ Being precise about it:
 - **STUN servers** (Google/Cloudflare by default) answer "what's my public IP:port?" for WebRTC.
   They carry **no** media. You can change or remove them in Settings → Network.
 - There are **no TURN/relay servers**, by design.
+- **Websites you link to**, if link previews are on: your app fetches the page to build the preview,
+  so that site sees your IP address (as if you'd opened the link). YouTube previews use YouTube's
+  public oEmbed endpoint. Your friends' apps don't contact the site.
 
 ## Is it actually faster?
 
@@ -129,8 +164,10 @@ Without relays, a direct connection needs at least one of you to be on a "hole-p
 
 - History lives only on members' devices. If nobody who has a message is online, a newcomer has
   to wait. History on disk is **not encrypted at rest**, so use BitLocker/FileVault.
-- Anyone with the invite code is a member, and there's no kick. To remove someone, create a new
-  group and re-invite everyone else.
+- Anyone with the invite code can join. Kicking someone cuts them off and changes the key, but
+  they keep the messages and files they already had. Nothing can take back data from a PC.
+- If the owner loses their data folder, nobody can promote new admins (existing admins keep
+  their powers). Back up the folder (Settings → Storage shows where it is).
 - No push-to-talk (toggle hotkeys instead), search, threads, custom emoji, bots or mobile app.
 - A mesh is perfect for 3–5 people. For 10+ in one call you'd want an SFU (a server).
 - System-audio capture when screen sharing (Windows) captures *all* sound, including friends'
@@ -168,8 +205,8 @@ npm install
 npm start                 # run the app
 npm run dev:alice         # isolated profiles to simulate several friends on one PC
 npm run dev:bob
-npm test                  # headless tests: sync, gossip, auth, forged messages, file transfer
-npm run test:e2e          # drives two real app instances: chat, image, avatar, voice call, screen share
+npm test                  # headless tests: sync, gossip, auth, forged messages, files, kick, friends
+npm run test:e2e          # drives two real app instances through every feature (chat, files, call, friends…)
 npm run dist              # Windows installer + portable .exe into dist/
 npm run test:update       # after dist: update flow against a local feed (never installs anything)
 ```
@@ -179,15 +216,25 @@ packaged build. `REAL_CAPTURE=1` uses your real screen instead of Chromium's tes
 Screenshots go to `test/screenshots/` (gitignored, because they can contain your screen).
 
 ```
-src/main/      Electron main process
-  crypto.js    invite codes, membership HMAC, op signatures
-  store.js     identity, settings, per-group signed op log, blob store
-  network.js   Hyperswarm connections, auth, sync/gossip, file transfer, diagnostics
-  updater.js   self-update from GitHub releases
-  framing.js   length-prefixed JSON/binary frames
-  main.js      window, IPC, custom protocols, screen-capture picker
-src/preload/   the narrow API the UI is allowed to call
-src/renderer/  UI (Preact + htm, no build step)
-  lib/model.js derives channels/messages/reactions from ops
-  lib/voice.js WebRTC mesh, codecs, bitrates, speaking detection, stats
+src/main/          Electron main process
+  crypto.js        invite and friend codes, membership HMAC, op signatures, sealed boxes, DM keys
+  store.js         identity, settings, friends, roles/kicks, per-group signed op log, blob store
+  network.js       Hyperswarm connections, auth, sync/gossip, friend requests, file transfer
+  linkpreview.js   builds link previews (OpenGraph, YouTube oEmbed) for links you send
+  datadir.js       choosing and moving the data folder
+  updater.js       self-update from GitHub releases
+  framing.js       length-prefixed JSON/binary frames
+  main.js          window, IPC, custom protocols, screen-capture picker
+src/preload/       the narrow API the UI is allowed to call
+src/renderer/      UI (Preact + htm, no build step)
+  lib/model.js     derives channels/messages/reactions/pins/roles from ops
+  lib/voice.js     WebRTC mesh, codecs, bitrates, speaking detection, moderation, stats
+  lib/denoise.js   RNNoise noise suppression (AudioWorklet: lib/rnnoise-worklet.js)
+  lib/markdown.js  chat markdown and full markdown documents
+  lib/highlight.js syntax highlighting for code blocks and code files
+  views/           chat, call stage, friends, members/context menu, emoji picker, modals
 ```
+
+Third-party pieces shipped with the app: [RNNoise](https://github.com/xiph/rnnoise) via
+[`@shiguredo/rnnoise-wasm`](https://github.com/shiguredo/rnnoise-wasm) (Apache-2.0; RNNoise itself
+BSD-3-Clause) and emoji data from [`unicode-emoji-json`](https://github.com/muan/unicode-emoji-json) (MIT).

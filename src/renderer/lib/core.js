@@ -7,7 +7,6 @@ export const model = new Model()
 export const voice = new Voice({ api, model })
 
 export const COLORS = ['#2dd4bf', '#f472b6', '#fbbf24', '#60a5fa', '#a78bfa', '#f87171', '#4ade80', '#fb923c']
-export const QUICK_EMOJI = ['👍', '❤️', '😂', '🔥', '😮', '😢', '🎉', '👀', '✅', '❌', '💀', '🙏', '😎', '🤔', '👏', '💯', '🥲', '😡', '🍕', '🎮', '🚀', '⭐', '🤝', '😴']
 
 export function useModel () {
   const [, force] = useState(0)
@@ -163,7 +162,7 @@ export function handleNewOps (gid, ops) {
     api.attention()
     if (!model.settings.notifications) continue
     try {
-      const n = new Notification(`${model.memberName(g, op.a)} · #${ch?.name || 'channel'}`, {
+      const n = new Notification(g.dm ? model.memberName(g, op.a) : `${model.memberName(g, op.a)} · #${ch?.name || 'channel'}`, {
         body: (op.d.text || '').slice(0, 180) || (op.d.att?.length ? '📎 sent a file' : ''),
         icon: model.memberAvatar(g, op.a) || undefined,
         silent: false

@@ -1,72 +1,101 @@
 import { html, render, useState, useEffect, useRef } from './vendor/preact-htm.js'
 import { api, model, voice, useModel, act, initials, handleNewOps, onBlobProgress, retryMissingBlobs } from './lib/core.js'
-import { shortKey } from './lib/model.js'
+import { shortKey, HOME, DM_CALL } from './lib/model.js'
 import { Icon } from './lib/icons.js'
-import { ChatView, Avatar } from './views/chat.js'
-import { VoiceStage, participantsOf, connLabel } from './views/stage.js'
+import { ChatView, Avatar, leaveGroupFlow } from './views/chat.js'
+import { VoiceStage, participantsOf, connLabel, MuteIcons } from './views/stage.js'
 import { Modals, ProfileEditor } from './views/modals.js'
-import { NetworkHealth, useNetStatus, hasProblem } from './views/nethealth.js'
+import { NetworkHealth } from './views/nethealth.js'
 import { initUpdates, UpdatePill } from './views/updates.js'
+import { Members, DmProfile, MemberMenu, openMemberMenu } from './views/members.js'
+import { HomeSidebar, FriendsPage, CallBanner, homeUnread, openDm } from './views/friends.js'
 
 // ---------------------------------------------------------------- shell
 
 function App () {
   useModel()
   const g = model.currentGroup()
+  const home = model.ui.gid === HOME || !!g?.dm
   const stage = model.ui.stage && g && model.ui.stage.gid === g.id ? g.channels.get(model.ui.stage.ch) : null
   const ch = g ? model.currentChannel(g) : null
 
   useEffect(() => {
     let total = 0
     for (const grp of model.groups.values()) total += model.groupUnread(grp).count
+    total += model.friends.incoming.length
     document.title = (total ? `(${total}) ` : '') + 'OpenDiscord' + (model.profile ? ` · ${model.profile}` : '')
     api.setUnread(total)
   })
 
   if (!model.me.name) return html`<${TitleBar} /><${Onboarding} /><${Toasts} />`
 
+  const footer = html`${voice.active && voice.active.gid && html`<${VoicePanel} />`}<${UserPanel} />`
   return html`
-    <${TitleBar} g=${g} />
+    <${TitleBar} g=${g} home=${home} />
     <div class="app">
-      <${Rail} />
-      ${g ? html`<${Sidebar} g=${g} ch=${ch} stage=${stage} />` : html`<aside class="sidebar"><div class="channels" /><${UserPanel} /></aside>`}
+      <${Rail} home=${home} />
+      ${home
+        ? html`<${HomeSidebar} g=${g} footer=${footer} />`
+        : g ? html`<${Sidebar} g=${g} ch=${ch} stage=${stage} footer=${footer} />` : html`<aside class="sidebar"><div class="channels" />${footer}</aside>`}
       <main class="main">
-        ${!g
-          ? html`<${Welcome} />`
-          : stage && !stage.deleted
-            ? html`<${VoiceStage} g=${g} ch=${stage} />`
-            : ch
-              ? html`<${ChatView} g=${g} ch=${ch} />`
-              : html`<${Syncing} g=${g} />`}
+        ${home && !g
+          ? html`<${FriendsPage} />`
+          : !g
+            ? html`<${Welcome} />`
+            : stage && !stage.deleted
+              ? html`<${VoiceStage} g=${g} ch=${stage} />`
+              : ch
+                ? html`<${ChatView} g=${g} ch=${ch} />`
+                : html`<${Syncing} g=${g} />`}
       </main>
-      ${g && !stage && html`<${Members} g=${g} />`}
+      ${g && !stage && (g.dm ? html`<${DmProfile} g=${g} />` : html`<${Members} g=${g} />`)}
     </div>
+    <${CallBanner} />
+    <${MemberMenu} />
     <${Modals} />
     <${Toasts} />`
 }
 
-function TitleBar ({ g }) {
+function TitleBar ({ g, home }) {
   return html`
     <div class="titlebar ${model.platform}">
       <div class="brand"><span class="logo-dot" />OpenDiscord${model.profile && html`<span class="profile-tag">${model.profile}</span>`}</div>
-      <div class="title-center">${g ? model.groupName(g) : ''}</div>
+      <div class="title-center">${g ? (g.dm ? '@' + model.groupName(g) : model.groupName(g)) : home ? 'Friends' : ''}</div>
       <div class="title-right"><${UpdatePill} /></div>
     </div>`
 }
 
-function Rail () {
-  const groups = [...model.groups.values()].sort((a, b) => a.joinedAt - b.joinedAt)
+export function GroupIcon ({ g, size = 48 }) {
+  const name = model.groupName(g)
+  return g.icon
+    ? html`<img class="group-icon" src=${g.icon} alt="" draggable="false" style=${{ width: size + 'px', height: size + 'px' }} />`
+    : html`<span class="group-initials">${initials(name)}</span>`
+}
+
+function Rail ({ home }) {
+  const groups = model.groupsList()
   const cur = model.ui.gid
+  const hu = homeUnread()
+  const inDmCall = voice.active && model.groups.get(voice.active.gid)?.dm
   return html`
     <nav class="rail">
+      <div class="rail-item ${home ? 'active' : ''} ${hu ? 'unread' : ''}">
+        <span class="pill" />
+        <button class="rail-btn home" title="Friends & private chats" onClick=${() => model.openHome()}>
+          <${Icon} name="users" size=${24} />
+          ${hu > 0 && html`<span class="badge">${hu}</span>`}
+          ${inDmCall && html`<span class="rail-voice"><${Icon} name="phone" size=${10} /></span>`}
+        </button>
+      </div>
+      <div class="rail-sep" />
       ${groups.map((g) => {
         const u = model.groupUnread(g)
         const name = model.groupName(g)
         return html`
           <div key=${g.id} class="rail-item ${g.id === cur ? 'active' : ''} ${u.count ? 'unread' : ''}">
             <span class="pill" />
-            <button class="rail-btn" title=${name} onClick=${() => { model.ui.stage = null; model.selectGroup(g.id) }}>
-              ${initials(name)}
+            <button class="rail-btn ${g.icon ? 'has-img' : ''}" title=${name} onClick=${() => { model.ui.stage = null; model.selectGroup(g.id) }}>
+              <${GroupIcon} g=${g} />
               ${u.mentions > 0 && html`<span class="badge">${u.mentions}</span>`}
               ${voice.active?.gid === g.id && html`<span class="rail-voice"><${Icon} name="speaker" size=${11} /></span>`}
             </button>
@@ -93,22 +122,13 @@ function GroupMenu ({ g, onClose }) {
       ${item('hash', 'Create text channel', () => model.openModal('channel', { gid: g.id, kind: 'text' }))}
       ${item('speaker', 'Create voice channel', () => model.openModal('channel', { gid: g.id, kind: 'voice' }))}
       ${item('edit', 'Rename group', () => model.openModal('renameGroup', { gid: g.id }))}
+      ${item('image', 'Change group picture', () => model.openModal('groupIcon', { gid: g.id }))}
       <hr />
-      ${item('leave', 'Leave group', () => model.openModal('confirm', {
-        title: `Leave ${model.groupName(g)}?`,
-        body: 'This deletes the group and its history from this device. You can rejoin later with an invite code, and history will sync back from your friends.',
-        confirm: 'Leave group',
-        danger: true,
-        onConfirm: async () => {
-          if (voice.active?.gid === g.id) voice.leave()
-          await act(() => api.leaveGroup(g.id))
-          model.removeGroup(g.id)
-        }
-      }), 'danger')}
+      ${item('leave', 'Leave group', () => leaveGroupFlow(g), 'danger')}
     </div>`
 }
 
-function Sidebar ({ g, ch, stage }) {
+function Sidebar ({ g, ch, stage, footer }) {
   const [menu, setMenu] = useState(false)
   const text = model.channelsOf(g, 'text')
   const voiceChs = model.channelsOf(g, 'voice')
@@ -116,12 +136,13 @@ function Sidebar ({ g, ch, stage }) {
   const openVoice = (c) => {
     model.ui.stage = { gid: g.id, ch: c.id }
     model.emit()
-    if (!voice.inChannel(g.id, c.id)) act(() => voice.join(g.id, c.id))
+    if (!voice.inChannel(g.id, c.id) && !g.kickedMe) act(() => voice.join(g.id, c.id))
   }
   const edit = (e, c) => { e.stopPropagation(); model.openModal('channel', { gid: g.id, chId: c.id }) }
   return html`
     <aside class="sidebar">
       <header class="group-header" onClick=${() => setMenu(!menu)}>
+        ${g.icon && html`<img class="gh-icon" src=${g.icon} alt="" />`}
         <h1>${model.groupName(g)}</h1>
         <${Icon} name=${menu ? 'x' : 'chevronDown'} size=${18} />
       </header>
@@ -152,19 +173,18 @@ function Sidebar ({ g, ch, stage }) {
                 const me = k === model.me.key
                 const st = me ? voice.statePayload() : g.voice.get(k) || {}
                 return html`
-                  <div key=${k} class="voice-user ${voice.speaking.has(k) ? 'speaking' : ''}">
+                  <div key=${k} class="voice-user ${voice.speaking.has(k) ? 'speaking' : ''}" onContextMenu=${(e) => openMemberMenu(e, g, k)} title="Right-click for options">
                     <${Avatar} name=${model.memberName(g, k)} color=${model.memberColor(g, k)} src=${model.memberAvatar(g, k)} size=${22} speaking=${voice.speaking.has(k)} />
                     <span class="vu-name">${model.memberName(g, k)}</span>
                     ${st.screen && html`<span class="live">LIVE</span>`}
                     ${st.cam && html`<${Icon} name="camera" size=${14} class="dim" />`}
-                    ${st.deaf ? html`<${Icon} name="headphonesOff" size=${14} class="bad" />` : st.muted ? html`<${Icon} name="micOff" size=${14} class="bad" />` : null}
+                    <${MuteIcons} g=${g} k=${k} st=${st} />
                   </div>`
               })}
             </div>`
         })}
       </div>
-      ${voice.active && voice.active.gid && html`<${VoicePanel} />`}
-      <${UserPanel} />
+      ${footer}
     </aside>`
 }
 
@@ -176,20 +196,26 @@ function VoicePanel () {
   const failed = calls.some(x => x.state === 'failed')
   const rtts = calls.map(x => x.stats?.rtt).filter(x => x != null)
   const rtt = rtts.length ? Math.round(rtts.reduce((a, b) => a + b, 0) / rtts.length) : null
-  const status = failed ? 'Some peers unreachable' : connecting ? 'Connecting…' : 'Voice connected'
+  const status = failed ? 'Some peers unreachable' : connecting ? 'Connecting…' : g?.dm && !calls.length ? 'Ringing…' : 'Voice connected'
+  const where = g?.dm ? 'Call with ' + model.groupName(g) : `${c?.name || 'Voice'} / ${model.groupName(g)}`
+  const open = () => {
+    model.ui.stage = { gid: voice.active.gid, ch: voice.active.ch }
+    model.selectGroup(voice.active.gid)
+  }
   return html`
     <div class="voice-panel">
       <div class="vp-row">
         <div class="vp-status ${failed ? 'bad' : connecting ? 'warn' : 'good'}" title=${calls.map(x => model.memberName(g, x.key) + ': ' + connLabel(x).text).join('\n') || 'Nobody else here yet'}>
           <${Icon} name="signal" size=${16} />
-          <div><b>${status}</b><small>${c?.name || 'Voice'} / ${model.groupName(g)}${rtt != null ? ` · ${rtt} ms` : ''}</small></div>
+          <div><b>${status}</b><small>${where}${rtt != null ? ` · ${rtt} ms` : ''}</small></div>
         </div>
         <button class="icon-btn" title="Disconnect" onClick=${() => voice.leave()}><${Icon} name="leave" size=${18} /></button>
       </div>
+      ${voice.serverMuted && html`<div class="vp-note"><${Icon} name="micOff" size=${13} /> A moderator muted you</div>`}
       <div class="vp-actions">
         <button class="btn ${voice.local.cam ? 'on' : ''}" onClick=${() => voice.toggleCamera()} title="Camera"><${Icon} name=${voice.local.cam ? 'camera' : 'cameraOff'} size=${18} /></button>
         <button class="btn ${voice.local.screen ? 'on' : ''}" onClick=${() => voice.local.screen ? voice.stopScreen() : model.openModal('screen')} title=${voice.local.screen ? 'Stop sharing' : 'Share screen'}><${Icon} name="screenUp" size=${18} /></button>
-        <button class="btn" onClick=${() => { model.ui.stage = { gid: voice.active.gid, ch: voice.active.ch }; model.selectGroup(voice.active.gid) }} title="Open call view"><${Icon} name="maximize" size=${18} /></button>
+        <button class="btn" onClick=${open} title="Open call view"><${Icon} name="maximize" size=${18} /></button>
       </div>
     </div>`
 }
@@ -200,47 +226,10 @@ function UserPanel () {
     <div class="user-panel">
       <${Avatar} name=${me.name} color=${me.color} src=${me.avatar} size=${34} dot="online" speaking=${voice.speaking.has(me.key)} />
       <div class="up-name" title=${'Public key ' + me.key}><b>${me.name}</b><small>${shortKey(me.key)}</small></div>
-      <button class="icon-btn ${voice.muted ? 'bad' : ''}" title=${voice.muted ? 'Unmute' : 'Mute'} onClick=${() => voice.toggleMute()}><${Icon} name=${voice.muted ? 'micOff' : 'mic'} size=${18} /></button>
+      <button class="icon-btn ${voice.muted || voice.serverMuted ? 'bad' : ''}" title=${voice.serverMuted ? 'Muted by a moderator' : voice.muted ? 'Unmute' : 'Mute'} onClick=${() => voice.toggleMute()}><${Icon} name=${voice.muted || voice.serverMuted ? 'micOff' : 'mic'} size=${18} /></button>
       <button class="icon-btn ${voice.deafened ? 'bad' : ''}" title=${voice.deafened ? 'Undeafen' : 'Deafen'} onClick=${() => voice.toggleDeafen()}><${Icon} name=${voice.deafened ? 'headphonesOff' : 'headphones'} size=${18} /></button>
       <button class="icon-btn" title="Settings" onClick=${() => model.openModal('settings')}><${Icon} name="settings" size=${18} /></button>
     </div>`
-}
-
-function Members ({ g }) {
-  const online = []
-  const offline = []
-  for (const m of g.members.values()) {
-    if (m.key === model.me.key || g.online.has(m.key)) online.push(m)
-    else offline.push(m)
-  }
-  if (!g.members.has(model.me.key)) online.unshift({ key: model.me.key })
-  const byName = (a, b) => model.memberName(g, a.key).localeCompare(model.memberName(g, b.key))
-  online.sort(byName)
-  offline.sort(byName)
-  const row = (m, isOnline) => {
-    const k = m.key
-    const me = k === model.me.key
-    const info = g.online.get(k)
-    const vs = g.voice.get(k) || (me && voice.active?.gid === g.id ? { ch: voice.active.ch } : null)
-    const vch = vs?.ch ? g.channels.get(vs.ch) : null
-    const sub = vch
-      ? html`<${Icon} name="speaker" size=${12} /> ${vch.name}`
-      : me ? 'You' : isOnline ? (info?.rtt != null ? `${info.rtt} ms · ${info.lan ? 'LAN' : 'direct'}` : 'Online') : 'Offline'
-    return html`
-      <div key=${k} class="member ${isOnline ? '' : 'off'}" title=${`${model.memberName(g, k)}\nKey ${k}`}>
-        <${Avatar} name=${model.memberName(g, k)} color=${model.memberColor(g, k)} src=${model.memberAvatar(g, k)} size=${32} dot=${isOnline ? 'online' : 'offline'} speaking=${voice.speaking.has(k)} />
-        <div><b style=${{ color: isOnline ? model.memberColor(g, k) : undefined }}>${model.memberName(g, k)}</b><small>${sub}</small></div>
-      </div>`
-  }
-  return html`
-    <aside class="members">
-      <div class="section-head"><span>Online — ${online.length}</span></div>
-      ${online.map(m => row(m, true))}
-      ${offline.length > 0 && html`<div class="section-head"><span>Offline — ${offline.length}</span></div>`}
-      ${offline.map(m => row(m, false))}
-      ${g.online.size === 0 && html`<${ConnectionHint} g=${g} />`}
-      <div class="p2p-note"><${Icon} name="shield" size=${14} /><span>Direct P2P · end-to-end encrypted · no servers</span></div>
-    </aside>`
 }
 
 function Syncing ({ g }) {
@@ -256,28 +245,16 @@ function Syncing ({ g }) {
     </div>`
 }
 
-// Shown under the member list when nobody else is connected, so "where are my friends?"
-// has an answer instead of an empty list.
-function ConnectionHint ({ g }) {
-  const st = useNetStatus(5000)
-  const gs = st?.groups?.[g.id]
-  const bad = hasProblem(st) || (gs && gs.found > gs.connected)
-  return html`
-    <button class="conn-hint ${bad ? 'bad' : ''}" onClick=${() => model.openModal('settings', { tab: 'network' })}>
-      <${Icon} name="signal" size=${14} />
-      <span>${!st ? 'Checking connection…' : bad ? 'Connection problem — see why' : "Can't see your friends? Check connection"}</span>
-    </button>`
-}
-
 function Welcome () {
   return html`
     <div class="center-card welcome">
       <div class="hero-mark"><span /><span /><span /></div>
       <h1>Hey ${model.me.name}!</h1>
-      <p>Create a group for you and your friends, or join one with an invite code. Everything goes straight from device to device — no accounts, no servers, no upload limits.</p>
+      <p>Create a group for you and your friends, join one with an invite code, or add a friend for private chats and calls. Everything goes straight from device to device — no accounts, no servers, no upload limits.</p>
       <div class="row center">
         <button class="btn primary lg" onClick=${() => model.openModal('addGroup', { tab: 'create' })}>Create a group</button>
         <button class="btn lg" onClick=${() => model.openModal('addGroup', { tab: 'join' })}>Join with invite</button>
+        <button class="btn lg" onClick=${() => { model.ui.friendsTab = 'add'; model.openHome() }}>Add a friend</button>
       </div>
     </div>`
 }
@@ -298,6 +275,15 @@ function Toasts () {
   return html`<div class="toasts">${model.ui.toasts.map(t => html`<div key=${t.id} class="toast ${t.kind}">${t.text}</div>`)}</div>`
 }
 
+function notifyCall (g) {
+  api.attention()
+  if (!model.settings.notifications) return
+  try {
+    const n = new Notification(`${model.groupName(g)} is calling you`, { body: 'Open OpenDiscord to answer', icon: model.memberAvatar(g, g.dm) || undefined })
+    n.onclick = () => { api.showWindow(); openDm(g) }
+  } catch {}
+}
+
 // ---------------------------------------------------------------- boot
 
 async function boot () {
@@ -307,6 +293,7 @@ async function boot () {
   model.platform = init.platform
   model.profile = init.profile
   model.version = init.version
+  model.setFriends(init.friends)
   document.body.classList.add('platform-' + init.platform)
   for (const g of init.groups) model.addGroup(g)
   for (const p of init.peers) for (const gid of p.groups) model.peerJoin(gid, p.key, p)
@@ -315,7 +302,17 @@ async function boot () {
     if (!model.groups.has(gid)) return
     const fresh = model.applyOps(gid, ops)
     handleNewOps(gid, fresh)
+    if (fresh.some(op => op.k === 'voice.mute' || op.k === 'member.role' || op.k === 'member.kick')) voice.onModeration()
   })
+  api.on('membership', (gid, info) => {
+    model.setMembership(gid, info)
+    if (info?.kickedMe && voice.active?.gid === gid) {
+      voice.leave()
+      model.toast(`You were removed from ${model.groupName(model.groups.get(gid))}`, 'error')
+    }
+    voice.onModeration()
+  })
+  api.on('friends', (f) => model.setFriends(f))
   api.on('peer-join', (gid, key, info) => {
     model.peerJoin(gid, key, info)
     retryMissingBlobs()
@@ -329,15 +326,22 @@ async function boot () {
   initUpdates()
   api.on('eph', (gid, from, d) => {
     switch (d.type) {
-      case 'voice':
+      case 'voice': {
+        const g = model.groups.get(gid)
+        const was = g?.voice.get(from)?.ch
         model.setVoiceState(gid, from, d)
         voice.onRemoteVoiceState(gid, from, d)
+        if (g?.dm === from && d.ch === DM_CALL && was !== DM_CALL && !voice.inChannel(gid, DM_CALL)) notifyCall(g)
         break
+      }
       case 'typing':
         model.setTyping(gid, d.ch, from)
         break
       case 'rtc':
         voice.onRtc(gid, from, d)
+        break
+      case 'move':
+        voice.onMove(gid, from, d)
         break
     }
   })

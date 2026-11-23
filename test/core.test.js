@@ -182,3 +182,116 @@ test('three friends: join, live chat, offline catch-up via a third peer, files, 
   await waitFor(() => closed, 20000, 'intruder to be disconnected')
   assert.strictEqual(gotData, false, 'intruder must not receive any group data')
 })
+
+test('kick: rotates the key, cuts the kicked friend off, old invites stop working, re-invite works', async (t) => {
+  const alice = await makeNode('k-alice')
+  const bob = await makeNode('k-bob')
+  const carol = await makeNode('k-carol')
+  const frank = await makeNode('k-frank')
+  const nodes = [alice, bob, carol, frank]
+  t.after(async () => { await Promise.all(nodes.map(n => n.net.stop())) })
+
+  const group = alice.store.createGroup('Mods')
+  const gid = group.id
+  alice.net.joinGroup(group)
+  const oldInvite = alice.store.inviteFor(gid)
+  for (const n of [bob, carol, frank]) n.net.joinGroup(n.store.joinGroup(oldInvite).group)
+  const g = (n) => n.store.groups.get(gid)
+  await waitFor(() => alice.net.peersIn(gid).length === 3 && [bob, carol, frank].every(n => g(alice).byAuthor.has(n.store.myKey)), 20000, 'everyone connected')
+  for (const n of nodes) assert.strictEqual(g(n).owner, alice.store.myKey, n.name + ' knows the owner')
+
+  // Roles: only the owner appoints admins; admins can't kick the owner
+  assert.throws(() => bob.store.setRole(gid, carol.store.myKey, 'admin'), /owner/)
+  const role = alice.store.setRole(gid, bob.store.myKey, 'admin')
+  alice.net.broadcastOps(gid, [role])
+  await waitFor(() => g(bob).admins.has(bob.store.myKey) && g(carol).admins.has(bob.store.myKey), 10000, 'admin role to sync')
+  assert.ok(!bob.store.canModerate(g(bob), bob.store.myKey, alice.store.myKey), 'admin cannot kick the owner')
+  assert.ok(!carol.store.canModerate(g(carol), carol.store.myKey, bob.store.myKey), 'member cannot kick')
+
+  // Frank goes offline; Bob (admin) kicks Carol
+  await frank.net.stop()
+  await waitFor(() => alice.net.peersIn(gid).length === 2, 10000, 'frank offline')
+  const kick = bob.store.kick(gid, carol.store.myKey)
+  bob.net.broadcastOps(gid, [kick]) // same order as the app: carol gets told, then cut off
+  bob.net.membershipChanged(gid)
+  assert.strictEqual(g(bob).epoch, 1)
+  await waitFor(() => g(alice).epoch === 1, 10000, 'alice to get the new key')
+  assert.ok(g(alice).secret.equals(g(bob).secret), 'alice and bob share the new key')
+  await waitFor(() => g(carol).kickedMe, 10000, 'carol to learn she was removed')
+  assert.ok(!g(carol).epochs.has(1), 'carol cannot open the new key')
+  await waitFor(() => !alice.net.peersIn(gid).some(p => p.key === carol.store.myKey) && !bob.net.peersIn(gid).some(p => p.key === carol.store.myKey), 10000, 'carol cut off')
+
+  const after = alice.store.append(gid, 'msg', { id: 'secret-plans', ch: 'x', text: 'after the kick' })
+  alice.net.broadcastOps(gid, [after])
+  await waitFor(() => texts(bob, gid).includes('after the kick'), 5000, 'bob gets new messages')
+  await new Promise(r => setTimeout(r, 2500))
+  assert.ok(!texts(carol, gid).includes('after the kick'), 'carol must not get messages after the kick')
+
+  // Someone with the OLD invite and a fresh identity is refused (only existing members may use old keys)
+  const dave = await makeNode('k-dave')
+  nodes.push(dave)
+  dave.net.joinGroup(dave.store.joinGroup(oldInvite).group)
+  await new Promise(r => setTimeout(r, 4000))
+  assert.ok(!alice.net.peersIn(gid).some(p => p.key === dave.store.myKey), 'old invite must not admit newcomers')
+  assert.strictEqual(texts(dave, gid).length, 0)
+
+  // Frank was offline during the kick: comes back on the old key, gets the new one from a friend
+  frank.net = new Network(frank.store, { bootstrap: testnet.bootstrap, authTimeout: 1500 })
+  await frank.net.start()
+  await waitFor(() => g(frank).epoch === 1 && texts(frank, gid).includes('after the kick'), 20000, 'frank to catch up on the new key')
+  assert.ok(g(frank).secret.equals(g(alice).secret))
+
+  // A brand-new friend with the NEW invite gets in; so does Carol when re-invited
+  const newInvite = alice.store.inviteFor(gid)
+  assert.notStrictEqual(newInvite, oldInvite)
+  const eve = await makeNode('k-eve')
+  nodes.push(eve)
+  eve.net.joinGroup(eve.store.joinGroup(newInvite).group)
+  await waitFor(() => texts(eve, gid).includes('after the kick'), 15000, 'eve joins with the new invite')
+
+  assert.strictEqual(g(carol).kickedMe || !g(carol).epochs.has(1), true)
+  const re = carol.store.joinGroup(newInvite)
+  assert.strictEqual(re.existed, true)
+  assert.strictEqual(re.rekeyed, true)
+  carol.net.joinGroup(re.group)
+  await waitFor(() => texts(carol, gid).includes('after the kick'), 15000, 'carol back after re-invite')
+  assert.strictEqual(g(carol).kickedMe, false)
+})
+
+test('friends: request by friend code, accept, private chat only the two can join', async (t) => {
+  const alice = await makeNode('f-alice')
+  const bob = await makeNode('f-bob')
+  const carol = await makeNode('f-carol')
+  t.after(async () => { await Promise.all([alice, bob, carol].map(n => n.net.stop())) })
+  const requests = []
+  bob.net.on('friend-request', (key) => requests.push(key))
+
+  // Alice adds Bob with his friend code; they share no group, so the request is dialled directly
+  const { group: aliceDm, key } = alice.store.addFriend(bob.store.friendCode())
+  assert.strictEqual(key, bob.store.myKey)
+  alice.net.joinGroup(aliceDm)
+  alice.net.sendFriendRequest(key)
+  await waitFor(() => requests.includes(alice.store.myKey), 20000, 'bob to receive the friend request')
+  assert.strictEqual(bob.store.friendsInfo().incoming[0].name, 'f-alice')
+  await waitFor(() => !alice.net.friendQueue.has(key), 5000, 'delivery confirmed')
+  assert.ok(!alice.store.isFriend(bob.store.myKey), 'not friends until bob accepts')
+
+  // Bob accepts: both derive the same private chat and connect
+  const bobDm = bob.store.acceptFriend(alice.store.myKey)
+  assert.strictEqual(bobDm.id, aliceDm.id, 'both sides derive the same private chat')
+  bob.net.joinGroup(bobDm)
+  await waitFor(() => alice.store.isFriend(bob.store.myKey), 15000, 'alice sees bob accepted')
+  assert.strictEqual(alice.store.friendsInfo().outgoing.length, 0)
+  const m = alice.store.append(aliceDm.id, 'msg', { id: 'dm1', ch: 'dm', text: 'just us' })
+  alice.net.broadcastOps(aliceDm.id, [m])
+  await waitFor(() => texts(bob, aliceDm.id).includes('just us'), 5000, 'private message')
+
+  // Even someone holding the private chat's secret can't get in: it's exactly two people
+  const stolen = { ...aliceDm }
+  const intruder = carol.store._createGroup({ id: stolen.id, secret: stolen.secret, dm: alice.store.myKey })
+  carol.net.joinGroup(intruder)
+  await new Promise(r => setTimeout(r, 4000))
+  assert.ok(!alice.net.peersIn(aliceDm.id).some(p => p.key === carol.store.myKey), 'third party refused')
+  assert.strictEqual(texts(carol, aliceDm.id).length, 0)
+  assert.throws(() => alice.store.inviteFor(aliceDm.id), /Private chats/)
+})

@@ -75,8 +75,9 @@ class Network extends EventEmitter {
     this.inflight = new Map() // hash -> Promise<path>
     this.nextTransferId = 1
     this.started = false
-    this.discoveries = new Map() // groupId -> hyperswarm discovery session
+    this.discoveries = new Map() // groupId -> Map(topicHex -> hyperswarm discovery session)
     this.failures = new Map() // remoteKeyHex -> { code, message, at, count }
+    this.friendQueue = new Set() // keys we owe a friend request until they confirm receipt
   }
 
   async start () {
@@ -96,7 +97,11 @@ class Network extends EventEmitter {
       stream.on('open', () => this.failures.delete(key))
       return stream
     }
+    // Always reachable by our public key, even without groups, so friend requests can be
+    // delivered. Only someone who already has our friend code (or shares a group) knows the key.
+    await this.swarm.listen().catch((err) => console.warn('[net] listen', err.message))
     for (const g of this.store.groups.values()) this._join(g)
+    for (const key of this.store.pendingOutgoing()) this.sendFriendRequest(key)
     // Hyperswarm only re-runs lookups every ~10 min, and stops retrying a peer after a few
     // failed hole punches. While a group has nobody connected, look again every minute so a
     // friend who just came online (or fixed their network) is found quickly.
@@ -106,20 +111,48 @@ class Network extends EventEmitter {
   }
 
   _refreshLonely () {
-    for (const [gid, d] of this.discoveries) {
-      if (this.peersIn(gid).length === 0) d.refresh().catch(() => {})
+    for (const [gid, ds] of this.discoveries) {
+      if (this.peersIn(gid).length === 0) for (const d of ds.values()) d.refresh().catch(() => {})
+    }
+    // Friend requests that haven't arrived yet: dial again (the friend may have come online)
+    for (const key of this.friendQueue) {
+      if (this.peers.has(key)) continue
+      const pk = Buffer.from(key, 'hex')
+      try { this.swarm.leavePeer(pk) } catch {}
+      this.swarm.joinPeer(pk)
     }
   }
 
+  // Announce every key epoch's topic: the current one for everyone, older ones so members who
+  // missed a kick can still find us and pick up the new key.
   _join (group) {
-    this.discoveries.set(group.id, this.swarm.join(group.topic, { server: true, client: true }))
+    const ds = this.discoveries.get(group.id) || new Map()
+    for (const topic of group.topics) {
+      const hex = topic.toString('hex')
+      if (!ds.has(hex)) ds.set(hex, this.swarm.join(topic, { server: true, client: true }))
+    }
+    this.discoveries.set(group.id, ds)
+  }
+
+  // Called after a kick, a role change or a new key arrived: re-announce, re-prove membership,
+  // and re-check everyone who is connected (a kicked peer loses access right here).
+  membershipChanged (groupId) {
+    const g = this.store.groups.get(groupId)
+    if (!g) return
+    this._join(g)
+    for (const peer of [...this.peers.values()]) {
+      const had = peer.groups.size > 0
+      this._send(peer, { t: 'auth', tags: this._myTags(peer) })
+      this._evaluate(peer)
+      if (had && !peer.groups.size) this._dropPeer(peer, true)
+    }
   }
 
   // Look the group topics up again right now instead of waiting for the periodic refresh
   // (Hyperswarm backs off for minutes after a few failed attempts).
   async retry () {
     this.failures.clear()
-    await Promise.allSettled([...this.discoveries.values()].map(d => d.refresh()))
+    await Promise.allSettled([...this.discoveries.values()].flatMap(ds => [...ds.values()].map(d => d.refresh())))
   }
 
   async diagnostics () {
@@ -127,10 +160,10 @@ class Network extends EventEmitter {
     const route = await defaultRoute()
     const groups = {}
     for (const g of this.store.groups.values()) {
-      const topic = g.topic.toString('hex')
+      const topics = new Set(g.topics.map(t => t.toString('hex')))
       const found = []
       for (const [key, info] of this.swarm?.peers || []) {
-        if ((info.topics || []).some(t => Buffer.from(t).toString('hex') === topic)) found.push(key)
+        if ((info.topics || []).some(t => topics.has(Buffer.from(t).toString('hex')))) found.push(key)
       }
       const connected = this.peersIn(g.id).map(p => p.key)
       groups[g.id] = {
@@ -171,11 +204,33 @@ class Network extends EventEmitter {
 
   leaveGroup (group) {
     this.discoveries.delete(group.id)
-    this.swarm.leave(group.topic).catch(() => {})
+    for (const topic of group.topics) this.swarm.leave(topic).catch(() => {})
     for (const peer of this.peers.values()) {
       if (peer.groups.delete(group.id)) this.emit('peer-leave', group.id, peer.key)
       this._send(peer, { t: 'auth', tags: this._myTags(peer) })
     }
+  }
+
+  // ---- friend requests ----
+  // Delivered app-to-app: Hyperswarm can dial a peer directly by its public key, which is the
+  // same key as the friend's identity. Retried until the friend's app confirms receipt.
+
+  sendFriendRequest (key) {
+    if (!/^[0-9a-f]{64}$/.test(key) || key === this.store.myKey) return
+    this.friendQueue.add(key)
+    const peer = this.peers.get(key)
+    if (peer) this._sendFriend(peer)
+    else this.swarm.joinPeer(Buffer.from(key, 'hex'))
+  }
+
+  cancelFriendRequest (key) {
+    this.friendQueue.delete(key)
+    try { this.swarm.leavePeer(Buffer.from(key, 'hex')) } catch {}
+  }
+
+  _sendFriend (peer) {
+    const me = this.store.identity
+    this._send(peer, { t: 'friend', name: me.name, color: me.color })
   }
 
   // ---- sending ----
@@ -251,6 +306,7 @@ class Network extends EventEmitter {
     this.peers.set(key, peer)
 
     this._send(peer, { t: 'hello', v: PROTOCOL_VERSION, app: this.appVersion, tags: this._myTags(peer) })
+    if (this.friendQueue.has(key)) this._sendFriend(peer)
     peer.authTimer = setTimeout(() => { if (!peer.groups.size) conn.destroy() }, this.authTimeout)
     peer.pingTimer = setInterval(() => this._send(peer, { t: 'ping', ts: Date.now() }), 5000)
   }
@@ -265,23 +321,36 @@ class Network extends EventEmitter {
     }
   }
 
-  _dropPeer (peer) {
+  // graceful: flush what we already wrote (e.g. the kick op) before closing
+  _dropPeer (peer, graceful = false) {
     if (this.peers.get(peer.key) !== peer) return
     this.peers.delete(peer.key)
     this._cleanupPeer(peer)
     for (const g of peer.groups) this.emit('peer-leave', g, peer.key)
     peer.groups.clear()
-    if (!peer.conn.destroyed) peer.conn.destroy()
+    if (peer.conn.destroyed) return
+    if (!graceful) return peer.conn.destroy()
+    peer.conn.end()
+    setTimeout(() => { if (!peer.conn.destroyed) peer.conn.destroy() }, 3000).unref?.()
   }
 
+  // One membership proof per group and key epoch. The receiver can't tell which group a tag
+  // belongs to unless it's in that group too.
   _myTags (peer) {
-    return [...this.store.groups.values()].map(g => c.authTag(g.secret, peer.hh, this.store.keyPair.publicKey))
+    const tags = []
+    for (const g of this.store.groups.values()) {
+      for (const secret of g.epochs.values()) tags.push(c.authTag(secret, peer.hh, this.store.keyPair.publicKey))
+    }
+    return tags
   }
 
   _evaluate (peer) {
     for (const g of this.store.groups.values()) {
-      const expected = c.authTag(g.secret, peer.hh, peer.remoteKey)
-      const ok = peer.remoteTags.has(expected)
+      let epoch = -1
+      for (const [e, secret] of g.epochs) {
+        if (e > epoch && peer.remoteTags.has(c.authTag(secret, peer.hh, peer.remoteKey))) epoch = e
+      }
+      const ok = epoch >= 0 && this.store.authorize(g, peer.key, epoch)
       if (ok && !peer.groups.has(g.id)) {
         peer.groups.add(g.id)
         this.emit('peer-join', g.id, peer.key, this.peerInfo(peer))
@@ -308,6 +377,13 @@ class Network extends EventEmitter {
           return
         case 'ping':
           this._send(peer, { t: 'pong', ts: msg.ts })
+          return
+        case 'friend': // may come from someone we share nothing with yet
+          if (this.store.receiveFriendRequest(peer.key, { name: msg.name, color: msg.color })) this.emit('friend-request', peer.key)
+          this._send(peer, { t: 'friend.ok' })
+          return
+        case 'friend.ok':
+          this.cancelFriendRequest(peer.key)
           return
         case 'pong':
           if (typeof msg.ts === 'number') {
@@ -339,7 +415,8 @@ class Network extends EventEmitter {
         }
         case 'ops': {
           if (!peer.groups.has(msg.g)) return
-          const { accepted, gap } = this.store.ingest(msg.g, msg.ops)
+          const { accepted, gap, membership } = this.store.ingest(msg.g, msg.ops)
+          if (membership) this.membershipChanged(msg.g)
           if (accepted.length) {
             this.emit('ops', msg.g, accepted)
             this.broadcastOps(msg.g, accepted, peer.key) // gossip to friends who may lack them

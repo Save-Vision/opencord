@@ -4,6 +4,7 @@
 // proofs, op signatures and invite codes on top.
 const crypto = require('crypto')
 const hc = require('hypercore-crypto')
+const sodium = require('sodium-native')
 
 const INVITE_PREFIX = 'OD1-'
 
@@ -55,9 +56,14 @@ function verifyOp (op) {
   } catch { return false }
 }
 
-function makeInvite (secret, name) {
-  const body = Buffer.from(JSON.stringify({ s: secret.toString('base64url'), n: name || '' }))
-  return INVITE_PREFIX + body.toString('base64url')
+// An invite carries the group's current secret, plus (since 0.3) the stable group id, the
+// key epoch and the owner's public key. The owner key is the root of trust for moderation.
+function makeInvite (secret, name, extra = {}) {
+  const body = { s: secret.toString('base64url'), n: name || '' }
+  if (extra.id) body.i = extra.id
+  if (extra.epoch) body.e = extra.epoch
+  if (extra.owner) body.o = extra.owner
+  return INVITE_PREFIX + Buffer.from(JSON.stringify(body)).toString('base64url')
 }
 
 function parseInvite (code) {
@@ -69,12 +75,77 @@ function parseInvite (code) {
   }
   const secret = Buffer.from(body.s || '', 'base64url')
   if (secret.length !== 32) throw new Error('Invite code is damaged — copy it again')
-  return { secret, name: String(body.n || '').slice(0, 100) }
+  const id = /^[0-9a-f]{32}$/.test(body.i || '') ? body.i : groupIdFromSecret(secret)
+  const epoch = Number.isInteger(body.e) && body.e >= 0 ? body.e : 0
+  const owner = /^[0-9a-f]{64}$/.test(body.o || '') ? body.o : null
+  return { secret, name: String(body.n || '').slice(0, 100), id, epoch, owner }
+}
+
+// Sealed boxes to a member's identity key (Ed25519 converted to X25519). Used to hand the
+// new group secret to each remaining member after a kick, inside a signed op.
+function sealTo (publicKeyHex, data) {
+  const pk = Buffer.alloc(sodium.crypto_box_PUBLICKEYBYTES)
+  sodium.crypto_sign_ed25519_pk_to_curve25519(pk, Buffer.from(publicKeyHex, 'hex'))
+  const out = Buffer.alloc(data.length + sodium.crypto_box_SEALBYTES)
+  sodium.crypto_box_seal(out, data, pk)
+  return out.toString('base64')
+}
+
+// Our X25519 secret key. A plain Buffer, wiped after use: sodium_malloc's guarded memory is an
+// external ArrayBuffer, which Electron's V8 memory cage refuses (it works in Node, fails in the app).
+function curveSecret (keyPair) {
+  const sk = Buffer.alloc(sodium.crypto_box_SECRETKEYBYTES)
+  sodium.crypto_sign_ed25519_sk_to_curve25519(sk, keyPair.secretKey)
+  return sk
+}
+
+function openSealed (keyPair, b64) {
+  let sk = null
+  try {
+    const ct = Buffer.from(String(b64), 'base64')
+    if (ct.length <= sodium.crypto_box_SEALBYTES) return null
+    const pk = Buffer.alloc(sodium.crypto_box_PUBLICKEYBYTES)
+    sodium.crypto_sign_ed25519_pk_to_curve25519(pk, keyPair.publicKey)
+    sk = curveSecret(keyPair)
+    const out = Buffer.alloc(ct.length - sodium.crypto_box_SEALBYTES)
+    return sodium.crypto_box_seal_open(out, ct, pk, sk) ? out : null
+  } catch { return null } finally { if (sk) sodium.sodium_memzero(sk) }
+}
+
+// Private chats: both friends derive the same secret from an X25519 key exchange between
+// their identity keys, so nobody else can ever compute it (or join the chat).
+function dmSecret (keyPair, otherHex) {
+  const mySk = curveSecret(keyPair)
+  const theirPk = Buffer.alloc(sodium.crypto_box_PUBLICKEYBYTES)
+  sodium.crypto_sign_ed25519_pk_to_curve25519(theirPk, Buffer.from(otherHex, 'hex'))
+  const shared = Buffer.alloc(sodium.crypto_scalarmult_BYTES)
+  sodium.crypto_scalarmult(shared, mySk, theirPk)
+  sodium.sodium_memzero(mySk)
+  const [a, b] = [keyPair.publicKey.toString('hex'), otherHex].sort()
+  const secret = sha256('opendiscord/dm/v1', shared, a, b)
+  sodium.sodium_memzero(shared)
+  return secret
+}
+
+const FRIEND_PREFIX = 'ODF1-'
+function makeFriendCode (publicKeyHex, name) {
+  return FRIEND_PREFIX + Buffer.from(JSON.stringify({ k: publicKeyHex, n: name || '' })).toString('base64url')
+}
+function parseFriendCode (code) {
+  code = String(code || '').trim()
+  if (/^[0-9a-f]{64}$/i.test(code)) return { key: code.toLowerCase(), name: '' }
+  if (code.startsWith(INVITE_PREFIX)) throw new Error("That's a group invite. Use “Join a group” for it.")
+  if (!code.startsWith(FRIEND_PREFIX)) throw new Error('Not an OpenDiscord friend code')
+  let body
+  try { body = JSON.parse(Buffer.from(code.slice(FRIEND_PREFIX.length), 'base64url').toString()) } catch { throw new Error('Friend code is damaged — copy it again') }
+  if (!/^[0-9a-f]{64}$/.test(body.k || '')) throw new Error('Friend code is damaged — copy it again')
+  return { key: body.k, name: String(body.n || '').slice(0, 32) }
 }
 
 module.exports = {
   sha256, groupIdFromSecret, topicFromSecret, authTag, safeEqualHex,
-  canonical, signOp, verifyOp, makeInvite, parseInvite,
+  canonical, signOp, verifyOp, makeInvite, parseInvite, sealTo, openSealed,
+  dmSecret, makeFriendCode, parseFriendCode,
   randomBytes: (n) => crypto.randomBytes(n),
   keyPair: (seed) => hc.keyPair(seed)
 }

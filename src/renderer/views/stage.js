@@ -2,6 +2,7 @@ import { html, useState, useEffect, useRef } from '../vendor/preact-htm.js'
 import { model, voice, act, fmtRate, saveSettings } from '../lib/core.js'
 import { Icon } from '../lib/icons.js'
 import { Avatar } from './chat.js'
+import { openMemberMenu } from './members.js'
 
 function Video ({ stream, muted = true, fit = 'contain', onDblClick }) {
   const ref = useRef()
@@ -10,6 +11,66 @@ function Video ({ stream, muted = true, fit = 'contain', onDblClick }) {
     if (el && el.srcObject !== stream) { el.srcObject = stream || null; el.play?.().catch(() => {}) }
   }, [stream])
   return html`<video ref=${ref} autoplay playsinline muted=${muted} style=${{ objectFit: fit }} onDblClick=${onDblClick} />`
+}
+
+// Screen shares can be zoomed (mouse wheel, toward the cursor) and panned (drag). Works in
+// fullscreen too. Clicks don't change the spotlight while zoomed in.
+const MAX_ZOOM = 8
+function ZoomableScreen ({ stream, onDblClick }) {
+  const wrap = useRef()
+  const drag = useRef(null)
+  const [z, setZ] = useState({ s: 1, x: 0, y: 0 })
+  useEffect(() => setZ({ s: 1, x: 0, y: 0 }), [stream])
+  const clamp = (s, x, y) => {
+    const el = wrap.current
+    if (!el || s <= 1) return { s: 1, x: 0, y: 0 }
+    const w = el.clientWidth
+    const h = el.clientHeight
+    return { s, x: Math.min(0, Math.max(w - w * s, x)), y: Math.min(0, Math.max(h - h * s, y)) }
+  }
+  const zoomAt = (factor, cx, cy) => setZ((cur) => {
+    const s = Math.min(MAX_ZOOM, Math.max(1, cur.s * factor))
+    // keep the point under the cursor where it is
+    return clamp(s, cx - (cx - cur.x) * (s / cur.s), cy - (cy - cur.y) * (s / cur.s))
+  })
+  const center = (factor) => {
+    const el = wrap.current
+    if (el) zoomAt(factor, el.clientWidth / 2, el.clientHeight / 2)
+  }
+  const onWheel = (e) => {
+    e.preventDefault()
+    e.stopPropagation()
+    const r = wrap.current.getBoundingClientRect()
+    zoomAt(Math.exp(-e.deltaY * 0.0015), e.clientX - r.left, e.clientY - r.top)
+  }
+  const onPointerDown = (e) => {
+    if (z.s <= 1 || e.button !== 0) return
+    e.currentTarget.setPointerCapture(e.pointerId)
+    drag.current = { x: e.clientX, y: e.clientY, ox: z.x, oy: z.y, moved: false }
+  }
+  const onPointerMove = (e) => {
+    const d = drag.current
+    if (!d) return
+    const dx = e.clientX - d.x
+    const dy = e.clientY - d.y
+    if (Math.abs(dx) + Math.abs(dy) > 3) d.moved = true
+    setZ(cur => clamp(cur.s, d.ox + dx, d.oy + dy))
+  }
+  const onPointerUp = () => { setTimeout(() => { drag.current = null }, 0) }
+  const zoomed = z.s > 1.001
+  return html`
+    <div class="zoom-wrap ${zoomed ? 'zoomed' : ''} ${drag.current?.moved ? 'dragging' : ''}" ref=${wrap}
+      onWheel=${onWheel} onPointerDown=${onPointerDown} onPointerMove=${onPointerMove} onPointerUp=${onPointerUp}
+      onClick=${(e) => { if (zoomed || drag.current?.moved) e.stopPropagation() }}>
+      <div class="zoom-inner" style=${{ transform: `translate(${z.x}px, ${z.y}px) scale(${z.s})` }}>
+        <${Video} stream=${stream} onDblClick=${onDblClick} />
+      </div>
+      <div class="zoom-controls" onClick=${(e) => e.stopPropagation()} onPointerDown=${(e) => e.stopPropagation()}>
+        <button title="Zoom out" disabled=${!zoomed} onClick=${() => center(1 / 1.5)}><${Icon} name="zoomOut" size=${16} /></button>
+        <button class="zoom-pct" title="Reset zoom" onClick=${() => setZ({ s: 1, x: 0, y: 0 })}>${Math.round(z.s * 100)}%</button>
+        <button title="Zoom in (or scroll over the stream)" disabled=${z.s >= MAX_ZOOM} onClick=${() => center(1.5)}><${Icon} name="zoomIn" size=${16} /></button>
+      </div>
+    </div>`
 }
 
 export function participantsOf (g, chId) {
@@ -56,10 +117,10 @@ export function VoiceStage ({ g, ch }) {
       <section class="stage idle">
         <div class="stage-join">
           <div class="intro-icon big"><${Icon} name="speaker" size=${44} /></div>
-          <h1>${ch.name}</h1>
+          <h1>${g.dm ? model.groupName(g) : ch.name}</h1>
           <p>${keys.length ? `${keys.map(k => model.memberName(g, k)).join(', ')} ${keys.length > 1 ? 'are' : 'is'} here.` : 'Nobody is here yet.'}</p>
           <div class="stage-avatars">${keys.map(k => html`<${Avatar} key=${k} name=${model.memberName(g, k)} color=${model.memberColor(g, k)} src=${model.memberAvatar(g, k)} size=${56} />`)}</div>
-          <button class="btn primary lg" onClick=${() => act(() => voice.join(g.id, ch.id))}>Join voice</button>
+          <button class="btn primary lg" onClick=${() => act(() => voice.join(g.id, ch.id))}>${g.dm ? (keys.length ? 'Join call' : 'Start call') : 'Join voice'}</button>
           <small class="muted">Audio, video and screen shares go directly between you, encrypted with DTLS-SRTP.</small>
         </div>
       </section>`
@@ -85,7 +146,7 @@ export function VoiceStage ({ g, ch }) {
         id: k + ':screen',
         el: html`
           <div class="tile screen" onClick=${() => toggle(k + ':screen')}>
-            ${stream ? html`<${Video} stream=${stream} onDblClick=${fullscreen} />` : html`<div class="tile-wait">Connecting to stream…</div>`}
+            ${stream ? (me ? html`<${Video} stream=${stream} onDblClick=${fullscreen} />` : html`<${ZoomableScreen} stream=${stream} onDblClick=${fullscreen} />`) : html`<div class="tile-wait">Connecting to stream…</div>`}
             <div class="tile-label"><span class="live">LIVE</span> ${me ? 'Your screen' : name + "'s screen"}</div>
             <div class="tile-stats">${me ? sendStatsLabel(st.screenLabel) : s ? `${s.w}×${s.h} · ${s.fps} fps · ${fmtRate(s.kbps)}${s.codec ? ' · ' + s.codec : ''}` : ''}</div>
             <button class="tile-fs" title="Fullscreen" onClick=${(e) => { e.stopPropagation(); fullscreen(e) }}><${Icon} name="maximize" size=${18} /></button>
@@ -97,12 +158,12 @@ export function VoiceStage ({ g, ch }) {
     people.push({
       id: k,
       el: html`
-        <div class="tile person ${voice.speaking.has(k) ? 'speaking' : ''}" onClick=${() => toggle(k)}>
+        <div class="tile person ${voice.speaking.has(k) ? 'speaking' : ''}" onClick=${() => toggle(k)} onContextMenu=${(e) => openMemberMenu(e, g, k)}>
           ${cam
             ? html`<${Video} stream=${cam} fit="cover" />`
             : html`<${Avatar} name=${name} color=${model.memberColor(g, k)} src=${model.memberAvatar(g, k)} size=${84} speaking=${voice.speaking.has(k)} />`}
           <div class="tile-label">
-            ${st.deaf ? html`<${Icon} name="headphonesOff" size=${15} class="bad" />` : st.muted ? html`<${Icon} name="micOff" size=${15} class="bad" />` : null}
+            <${MuteIcons} g=${g} k=${k} st=${st} size=${15} />
             ${me ? name + ' (you)' : name}
           </div>
           ${conn && html`<div class="tile-conn ${conn.cls}" title="Connection to ${name}"><${Icon} name="signal" size=${13} /> ${conn.text}</div>`}
@@ -125,7 +186,7 @@ export function VoiceStage ({ g, ch }) {
     <section class="stage">
       <header class="chat-header">
         <${Icon} name="speaker" size=${20} class="dim" />
-        <h2>${ch.name}</h2>
+        <h2>${g.dm ? 'Call with ' + model.groupName(g) : ch.name}</h2>
         <span class="header-note"><${Icon} name="shield" size=${13} /> Peer-to-peer · end-to-end encrypted</span>
       </header>
       ${failed && html`<div class="banner bad">A direct connection to someone could not be established. Both of you may be behind strict NAT/CGNAT — see README → "If a call won't connect".</div>`}
@@ -136,6 +197,15 @@ export function VoiceStage ({ g, ch }) {
       </div>
       <${CallControls} />
     </section>`
+}
+
+// Deafened / muted / muted by a moderator / muted for me
+export function MuteIcons ({ g, k, st, size = 14 }) {
+  const server = model.isServerMuted(g, k)
+  const local = k !== model.me.key && model.settings.localMutes?.[k]
+  return html`
+    ${st.deaf ? html`<${Icon} name="headphonesOff" size=${size} class="bad" title="Deafened" />` : server ? html`<span class="server-mute" title="Muted by a moderator"><${Icon} name="micOff" size=${size} /></span>` : st.muted ? html`<${Icon} name="micOff" size=${size} class="bad" title="Muted" />` : null}
+    ${local && html`<${Icon} name="volumeX" size=${size} class="bad" title="Muted for you" />`}`
 }
 
 export function CallControls () {

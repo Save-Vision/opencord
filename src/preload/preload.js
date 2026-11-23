@@ -2,7 +2,7 @@
 // The only bridge between the sandboxed UI and the main process.
 const { contextBridge, ipcRenderer, webUtils } = require('electron')
 
-const EVENTS = new Set(['ops', 'peer-join', 'peer-leave', 'peer-update', 'eph', 'blob-progress', 'focus-change', 'hotkey', 'update'])
+const EVENTS = new Set(['ops', 'peer-join', 'peer-leave', 'peer-update', 'eph', 'blob-progress', 'focus-change', 'hotkey', 'update', 'membership', 'friends'])
 const invoke = (ch, ...args) => ipcRenderer.invoke(ch, ...args)
 
 contextBridge.exposeInMainWorld('od', {
@@ -14,6 +14,23 @@ contextBridge.exposeInMainWorld('od', {
   joinGroup: (invite) => invoke('group:join', invite),
   leaveGroup: (id) => invoke('group:leave', id),
   getInvite: (id) => invoke('group:invite', id),
+
+  kick: (gid, key) => invoke('member:kick', gid, key),
+  setRole: (gid, key, role) => invoke('member:role', gid, key, role),
+
+  friends: () => invoke('friends:info'),
+  addFriend: (code, name) => invoke('friend:add', code, name),
+  acceptFriend: (key) => invoke('friend:accept', key),
+  declineFriend: (key) => invoke('friend:decline', key),
+  removeFriend: (key) => invoke('friend:remove', key),
+
+  storageInfo: () => invoke('storage:info'),
+  pickStorage: () => invoke('storage:pick'),
+  checkStorage: (picked) => invoke('storage:check', picked),
+  moveStorage: (dir, existing) => invoke('storage:move', dir, existing),
+  openStorage: () => invoke('storage:open'),
+
+  linkPreview: (url) => invoke('link:preview', url),
 
   append: (gid, kind, data) => invoke('op:append', gid, kind, data),
   sendEph: (gid, to, data) => ipcRenderer.send('eph', gid, to, data),
