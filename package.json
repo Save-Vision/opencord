@@ -1,0 +1,80 @@
+{
+  "name": "opendiscord",
+  "productName": "OpenDiscord",
+  "version": "0.1.0",
+  "description": "Serverless, end-to-end encrypted P2P chat, voice and screen sharing for a small group of friends",
+  "main": "src/main/main.js",
+  "private": true,
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "dev:alice": "electron . --profile=alice",
+    "dev:bob": "electron . --profile=bob",
+    "test": "node --test test/core.test.js",
+    "test:e2e": "node test/e2e.mjs",
+    "icon": "node scripts/make-icon.js",
+    "dist": "electron-builder --win",
+    "dist:mac": "electron-builder --mac",
+    "dist:linux": "electron-builder --linux"
+  },
+  "dependencies": {
+    "b4a": "^1.9.0",
+    "htm": "^3.1.1",
+    "hypercore-crypto": "^3.7.0",
+    "hyperswarm": "^4.17.2"
+  },
+  "devDependencies": {
+    "electron": "^45.4.1",
+    "electron-builder": "^26.18.0",
+    "playwright-core": "^1.65.1"
+  },
+  "build": {
+    "appId": "app.opendiscord",
+    "productName": "OpenDiscord",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "src/**/*",
+      "build/icon.png",
+      "node_modules/**/*",
+      "!node_modules/**/{test,tests,example,examples,docs}/**",
+      "!test/**"
+    ],
+    "asar": true,
+    "asarUnpack": [
+      "**/*.node",
+      "**/prebuilds/**"
+    ],
+    "icon": "build/icon.png",
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false
+    },
+    "portable": {
+      "artifactName": "${productName}-${version}-portable.exe"
+    },
+    "mac": {
+      "target": [
+        "dmg"
+      ],
+      "category": "public.app-category.social-networking",
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "OpenDiscord needs the microphone for voice chat.",
+        "NSCameraUsageDescription": "OpenDiscord needs the camera for video chat."
+      }
+    },
+    "linux": {
+      "target": [
+        "AppImage"
+      ],
+      "category": "Network"
+    }
+  }
+}

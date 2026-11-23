@@ -1,0 +1,4 @@
+node_modules/
+dist/
+# e2e screenshots can contain your real screen when run with REAL_CAPTURE=1
+test/screenshots/

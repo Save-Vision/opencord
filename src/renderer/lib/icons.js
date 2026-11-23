@@ -1,0 +1,60 @@
+import { h } from '../vendor/preact-htm.js'
+
+// 24×24 stroke icons. Strings are path data; arrays [cx, cy, r] are circles.
+const ICONS = {
+  hash: ['M4 9h16', 'M4 15h16', 'M10 3 8 21', 'M16 3l-2 18'],
+  speaker: ['M11 5 6 9H2v6h4l5 4V5z', 'M15.5 8.5a5 5 0 0 1 0 7', 'M19 5a10 10 0 0 1 0 14'],
+  mic: ['M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z', 'M19 10v2a7 7 0 0 1-14 0v-2', 'M12 19v3'],
+  micOff: ['M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z', 'M19 10v2a7 7 0 0 1-14 0v-2', 'M12 19v3', 'M3 3l18 18'],
+  headphones: ['M3 18v-6a9 9 0 0 1 18 0v6', 'M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3z', 'M3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3z'],
+  headphonesOff: ['M3 18v-6a9 9 0 0 1 15.4-6.4', 'M21 12v6', 'M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3', 'M3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3z', 'M3 3l18 18'],
+  leave: ['M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4', 'M16 17l5-5-5-5', 'M21 12H9'],
+  screen: ['M3 4h18v12H3z', 'M8 20h8', 'M12 16v4'],
+  screenUp: ['M3 4h18v12H3z', 'M8 20h8', 'M12 16v4', 'M12 13V7', 'M9 10l3-3 3 3'],
+  camera: ['M15 10l5-3v10l-5-3z', 'M3 6h12v12H3z'],
+  cameraOff: ['M15 10l5-3v10l-5-3z', 'M3 6h12v12H3z', 'M2 2l20 20'],
+  settings: ['M4 21v-7', 'M4 10V3', 'M12 21v-9', 'M12 8V3', 'M20 21v-5', 'M20 12V3', 'M1 14h6', 'M9 8h6', 'M17 16h6'],
+  plus: ['M12 5v14', 'M5 12h14'],
+  x: ['M18 6 6 18', 'M6 6l12 12'],
+  copy: ['M9 9h11v11H9z', 'M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1'],
+  reply: ['M9 17l-5-5 5-5', 'M4 12h11a5 5 0 0 1 5 5v2'],
+  edit: ['M17 3l4 4L8 20H4v-4L17 3z'],
+  trash: ['M3 6h18', 'M8 6V4h8v2', 'M6 6l1 14h10l1-14'],
+  smile: [[12, 12, 10], 'M8 14s1.5 2 4 2 4-2 4-2', 'M9 9h.01', 'M15 9h.01'],
+  clip: ['M21.4 11.1l-9.2 9.2a6 6 0 0 1-8.5-8.5l9.2-9.2a4 4 0 0 1 5.7 5.7l-9.2 9.2a2 2 0 0 1-2.8-2.8l8.5-8.5'],
+  download: ['M12 3v12', 'M7 10l5 5 5-5', 'M5 21h14'],
+  users: ['M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2', [9, 7, 4], 'M22 21v-2a4 4 0 0 0-3-3.9', 'M16 3.1a4 4 0 0 1 0 7.8'],
+  userPlus: ['M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2', [9, 7, 4], 'M19 8v6', 'M22 11h-6'],
+  lock: ['M5 11h14v10H5z', 'M8 11V7a4 4 0 0 1 8 0v4'],
+  signal: ['M2 20h.01', 'M7 20v-4', 'M12 20v-8', 'M17 20V8', 'M22 20V4'],
+  maximize: ['M8 3H5a2 2 0 0 0-2 2v3', 'M21 8V5a2 2 0 0 0-2-2h-3', 'M3 16v3a2 2 0 0 0 2 2h3', 'M16 21h3a2 2 0 0 0 2-2v-3'],
+  chevronDown: ['M6 9l6 6 6-6'],
+  file: ['M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z', 'M14 2v6h6'],
+  check: ['M20 6 9 17l-5-5'],
+  zap: ['M13 2 3 14h9l-1 8 10-12h-9l1-8z'],
+  send: ['M22 2 11 13', 'M22 2l-7 20-4-9-9-4 20-7z'],
+  pencilLine: ['M12 20h9', 'M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z'],
+  globe: [[12, 12, 10], 'M2 12h20', 'M12 2a15 15 0 0 1 0 20', 'M12 2a15 15 0 0 0 0 20'],
+  shield: ['M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z', 'M9 12l2 2 4-4']
+}
+
+export function Icon ({ name, size = 20, class: cls = '', title }) {
+  const parts = ICONS[name] || []
+  return h('svg', {
+    class: 'icon ' + cls,
+    width: size,
+    height: size,
+    viewBox: '0 0 24 24',
+    fill: 'none',
+    stroke: 'currentColor',
+    'stroke-width': 2,
+    'stroke-linecap': 'round',
+    'stroke-linejoin': 'round',
+    'aria-hidden': title ? undefined : 'true'
+  }, [
+    title ? h('title', null, title) : null,
+    ...parts.map((p, i) => Array.isArray(p)
+      ? h('circle', { key: i, cx: p[0], cy: p[1], r: p[2] })
+      : h('path', { key: i, d: p }))
+  ])
+}
