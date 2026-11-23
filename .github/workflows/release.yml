@@ -5,7 +5,8 @@ name: Release
 # and update themselves.
 #
 # Versions are automatic: major.minor come from package.json, the patch number counts up
-# (see scripts/next-version.js). Put [skip release] in a commit message to push without releasing.
+# (see scripts/next-version.js). Start a commit's first line with [skip release] to push without
+# releasing. Only the first line counts, so the phrase can appear in a commit body safely.
 #
 # Where releases go:
 #   - By default, this repository. The app downloads updates without logging in, so this
@@ -29,8 +30,19 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      release: ${{ steps.check.outputs.release }}
+    steps:
+      - id: check
+        run: |
+          subject=$(jq -r '(.head_commit.message // "") | split("\n")[0]' "$GITHUB_EVENT_PATH")
+          if [[ "$subject" == *"[skip release]"* ]]; then echo "release=false"; else echo "release=true"; fi >> "$GITHUB_OUTPUT"
+
   release:
-    if: ${{ !contains(github.event.head_commit.message, '[skip release]') }}
+    needs: gate
+    if: needs.gate.outputs.release == 'true'
     runs-on: windows-latest
     env:
       RELEASES_REPO: ${{ vars.RELEASES_REPO || github.repository }}

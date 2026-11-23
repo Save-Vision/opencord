@@ -149,7 +149,8 @@ version, lets you check by hand, and turns automatic checks off.
 runs the tests, builds the installer and portable exe, and publishes a GitHub release `vX.Y.Z`.
 - **Version numbers:** `major.minor` comes from `package.json` and the patch number counts up
   by itself (0.2.0, 0.2.1, 0.2.2, …). For a bigger release, set `package.json` to e.g. `0.3.0`.
-- **Skipping a release:** put `[skip release]` in the commit message to push without releasing.
+- **Skipping a release:** start the commit's first line with `[skip release]` to push without
+  releasing. Only the first line counts.
 - **The repository must be public**, because the app downloads updates without logging in.
   To keep the source private, create a separate **public** repo for releases (with a README so
   it has a commit). Then, in this repo's *Settings → Secrets and variables → Actions*, add:
