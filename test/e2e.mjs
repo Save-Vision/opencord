@@ -9,7 +9,8 @@
 // a call over the fallback path, the update-required screen, and restoring a backup. Since 0.6.1:
 // the themes, moving and resizing the floating panels. Since 0.6.2: light and dark modes, the
 // Minimal theme, and two people writing in one focus document at once; Bob uses Glass (light)
-// from then on.
+// from then on. Since 0.6.3: the live preview, formatting buttons, lists that continue on Enter
+// and checkboxes ticked in the preview.
 // Screenshots land in test/screenshots/.
 // Run: npm run test:e2e
 import { _electron as electron } from 'playwright-core'
@@ -406,9 +407,26 @@ try {
   // each sees the other in the document
   await alice.locator('.focus-people .avatar').first().waitFor({ timeout: 10000 })
   await bob.locator('.focus-people .avatar').first().waitFor({ timeout: 10000 })
-  await bob.getByRole('button', { name: 'Split', exact: true }).click()
+  // the live view (the default) shows the formatted text; every Enter is a new line there
   // (Bob's words now start the first line, so "# Trip plan" is no longer a heading)
+  await bob.locator('.focus-views button.active', { hasText: 'Live' }).waitFor()
   await bob.locator('.focus-preview p', { hasText: 'I bring the tent' }).waitFor({ timeout: 5000 })
+  if (await bob.locator('.focus-preview p:has-text("I bring the tent") br').count() < 1) throw new Error('a new line should be a line break in the preview')
+  // formatting without knowing Markdown: the guide, a button, and lists that continue on Enter
+  await alice.locator('.focus-guide').waitFor() // open by itself the first time
+  await alice.locator('.focus-text').evaluate((el) => { const i = el.value.indexOf('Friday'); el.focus(); el.setSelectionRange(i, i + 6) })
+  await alice.locator('.ft-btn[data-tool="bold"]').click()
+  await alice.keyboard.press('Control+End')
+  await alice.keyboard.press('Enter')
+  await alice.locator('.ft-btn[data-tool="task"]').click()
+  await alice.keyboard.type('tent\nsnacks')
+  await alice.waitForFunction(() => document.querySelector('.focus-text').value.endsWith('- [ ] tent\n- [ ] snacks'), null, { timeout: 5000 })
+  await bob.locator('.focus-preview strong', { hasText: 'Friday' }).waitFor({ timeout: 10000 })
+  await bob.locator('.focus-preview li.task', { hasText: 'snacks' }).waitFor({ timeout: 10000 })
+  // Bob ticks "tent" in his live view: it's ticked in the text for both
+  await bob.locator('.focus-preview li.task', { hasText: 'tent' }).click()
+  await alice.waitForFunction(() => document.querySelector('.focus-text').value.includes('- [x] tent'), null, { timeout: 10000 })
+  await alice.locator('.focus-preview li.task input:checked').waitFor({ timeout: 5000 })
   await alice.mouse.move(400, 300)
   await settle(alice)
   await shot(alice, '56-focus-alice')

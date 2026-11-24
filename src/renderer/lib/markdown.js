@@ -233,7 +233,7 @@ function docBlocks (text, ctx, depth = 0, tight = false) {
     // A line ending in two spaces or a backslash is a hard break; other newlines are spaces
     const parts = []
     para.forEach((l, j) => {
-      if (j) parts.push(/\\$/.test(para[j - 1]) ? h('br', { key: 'br' + j }) : ' ')
+      if (j) parts.push(ctx.breaks || /\\$/.test(para[j - 1]) ? h('br', { key: 'br' + j }) : ' ')
       parts.push(...inline(l.replace(/\\$/, ''), ctx, j * 1000))
     })
     out.push(tight && out.length === 0 ? h('span', { key: out.length }, parts) : h('p', { key: out.length }, parts))

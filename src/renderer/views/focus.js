@@ -6,12 +6,18 @@
 // signed 'doc.edit' op a moment later (bursts of typing become one op). Friends' edits merge
 // in without moving your caret. Who else has the document open travels as ephemeral 'doc'
 // messages, like typing indicators.
+//
+// Live (the default) shows the formatted text next to what you type, block by block, with the
+// block you're in highlighted; Preview shows only the result. The buttons on the left format the
+// selection for people who don't know Markdown (lib/mdedit.js), and the guide explains each one.
 
-import { html, useState, useEffect, useLayoutEffect, useRef } from '../vendor/preact-htm.js'
+import { html, useState, useEffect, useLayoutEffect, useRef, useMemo } from '../vendor/preact-htm.js'
 import { api, model, act, append, rid, useModel } from '../lib/core.js'
 import { mergeEdits, chunkEdit } from '../lib/textcrdt.js'
 import { Icon } from '../lib/icons.js'
-import { Avatar, MarkdownView } from './chat.js'
+import { Avatar } from './chat.js'
+import { renderMarkdownDoc } from '../lib/markdown.js'
+import { TOOLS, toolForKey, splitBlocks, blockAt, diffSpan, continueList, toggleTask } from '../lib/mdedit.js'
 
 const FLUSH_IDLE = 350 // ms without typing before the edit is sent
 const FLUSH_MAX = 1200 // ...but never later than this after the first unsent key
@@ -107,19 +113,83 @@ export function DocsView ({ g }) {
     </div>`
 }
 
+// ---------------------------------------------------------------- the live preview
+
+// Every newline is a line break here: people who don't know Markdown expect Enter to start a line
+const previewCtx = { openLink: (u) => api.openExternal(u), breaks: true }
+
+// Renders the document block by block; unchanged blocks keep their rendering
+function LivePreview ({ text, current, onPick, onTask, refEl }) {
+  const cache = useRef(new Map())
+  const blocks = splitBlocks(text)
+  const next = new Map()
+  const items = blocks.map((b, i) => {
+    // (a block that appears twice gets its own copy: one rendering can't be in two places)
+    let node = next.has(b.text) ? null : cache.current.get(b.text)
+    if (!node) node = renderMarkdownDoc(b.text, previewCtx)
+    if (!next.has(b.text)) next.set(b.text, node)
+    const click = (e) => {
+      if (e.target.closest('a')) return
+      // a checkbox: tick it in the text
+      const li = e.target.closest('li.task')
+      if (li) return onTask(b.line, [...e.currentTarget.querySelectorAll('li.task')].indexOf(li))
+      onPick(b.line)
+    }
+    return html`<div key=${i + ':' + b.line} class="fp-block ${i === current ? 'current' : ''}" data-line=${b.line} onClick=${click}>${node}</div>`
+  })
+  cache.current = next
+  return html`
+    <div class="focus-preview" ref=${refEl}>
+      ${blocks.length
+        ? items
+        : html`<div class="fp-empty"><b>Your formatted text appears here as you type.</b><span>New to formatting? Use the buttons on the left, or open the guide with <${Icon} name="help" size=${14} />.</span></div>`}
+    </div>`
+}
+
+// ---------------------------------------------------------------- the formatting guide
+
+function Guide ({ onUse, onClose }) {
+  const examples = useMemo(() => TOOLS.filter(t => !t.sep).map(t => ({ ...t, shown: renderMarkdownDoc(t.md, previewCtx) })), [])
+  return html`
+    <aside class="focus-guide" aria-label="Formatting guide">
+      <header><b>How formatting works</b><button class="icon-btn small" title="Close the guide" onClick=${onClose}><${Icon} name="x" size=${14} /></button></header>
+      <p>Just type. To format, select some words and press a button on the left. Or type the signs yourself: they turn into formatting in the live view.</p>
+      ${examples.map(t => html`
+        <div key=${t.id} class="fg-item">
+          <div class="fg-head"><${Icon} name=${t.icon} size=${15} /><b>${t.label}</b>${t.keys && html`<kbd>${t.keys}</kbd>`}</div>
+          <small>${t.hint}</small>
+          <div class="fg-example">
+            <pre class="fg-src">${t.md}</pre>
+            <div class="fg-out">${t.shown}</div>
+          </div>
+          <button class="btn sm" onClick=${() => onUse(t)}>Use</button>
+        </div>`)}
+      <p class="dim">This way of writing is called Markdown. The .md files you save open in most notes and code apps.</p>
+    </aside>`
+}
+
 // ---------------------------------------------------------------- the editor
+
+const VIEWS = [['write', 'Write'], ['live', 'Live'], ['preview', 'Preview']]
+const savedView = () => {
+  const v = localStorage.getItem('od.focusView')
+  return v === 'split' ? 'live' : VIEWS.some(([k]) => k === v) ? v : 'live'
+}
 
 export function FocusEditor ({ g, doc }) {
   useModel()
   const area = useRef()
+  const preview = useRef()
   const pending = useRef(null)
   const timers = useRef({ idle: null, max: null })
   const ids = useRef(doc.text.visible().slice())
   const composing = useRef(false)
   const lastKey = useRef(0)
-  const [view, setView] = useState(() => localStorage.getItem('od.focusView') || 'write')
+  const [view, setView] = useState(savedView)
   const [calm, setCalm] = useState(false)
   const [name, setName] = useState(doc.name)
+  const [caretLine, setCaretLine] = useState(0)
+  const [guide, setGuide] = useState(() => !doc.text.text().trim() && !localStorage.getItem('od.mdGuideSeen'))
   const text = doc.text.text()
 
   const flush = () => {
@@ -131,16 +201,49 @@ export function FocusEditor ({ g, doc }) {
     if (ed && (ed.r.length || ed.x.length)) act(() => sendEdit(g.id, doc.id, ed))
   }
 
+  const trackCaret = () => {
+    const el = area.current
+    if (el) setCaretLine(el.value.slice(0, el.selectionStart).split('\n').length - 1)
+  }
+
   const onInput = (e) => {
     const ed = doc.text.localReplace(e.target.value, model.me.key)
     ids.current = doc.text.visible().slice()
     lastKey.current = Date.now()
+    trackCaret()
     if (!ed) return
     pending.current = mergeEdits(pending.current, ed)
     clearTimeout(timers.current.idle)
     timers.current.idle = setTimeout(flush, FLUSH_IDLE)
     if (!timers.current.max) timers.current.max = setTimeout(flush, FLUSH_MAX)
     model.emit()
+  }
+
+  const pick = (v) => { setView(v); try { localStorage.setItem('od.focusView', v) } catch {} }
+
+  // A button or shortcut: change just the affected span through the editor itself, so Ctrl+Z
+  // undoes it like typing, then select what to type next
+  const apply = (tool) => {
+    const el = area.current
+    if (!el) return
+    if (view === 'preview') pick('live')
+    el.focus()
+    applyResult(tool.run({ text: el.value, start: el.selectionStart, end: el.selectionEnd }))
+  }
+  const applyResult = (res) => {
+    const el = area.current
+    if (!el) return
+    el.focus() // the editing commands only work on the focused field
+    if (res.text === el.value) { el.setSelectionRange(res.start, res.end); trackCaret(); return }
+    const d = diffSpan(el.value, res.text)
+    el.setSelectionRange(d.from, d.to)
+    const ok = d.insert ? document.execCommand('insertText', false, d.insert) : document.execCommand('delete')
+    if (!ok || el.value !== res.text) {
+      el.value = res.text
+      onInput({ target: el })
+    }
+    el.setSelectionRange(res.start, res.end)
+    trackCaret()
   }
 
   // A friend's edit arrived: put the new text in and keep the caret next to the same characters
@@ -163,6 +266,30 @@ export function FocusEditor ({ g, doc }) {
     ids.current = vis.slice()
   })
 
+  // Keep the block you're writing in visible in the live view
+  const current = blockAt(splitBlocks(text), caretLine)
+  useEffect(() => {
+    if (view !== 'live') return
+    preview.current?.querySelector('.fp-block.current')?.scrollIntoView({ block: 'nearest' })
+  }, [current, view])
+  // ...and scroll it along with the editor
+  const syncScroll = () => {
+    const el = area.current
+    const pv = preview.current
+    if (!el || !pv || view !== 'live') return
+    const max = el.scrollHeight - el.clientHeight
+    pv.scrollTop = max > 0 ? (el.scrollTop / max) * (pv.scrollHeight - pv.clientHeight) : 0
+  }
+  // Clicking a block in the preview puts the caret at its start
+  const jumpTo = (line) => {
+    const el = area.current
+    if (!el) return
+    const at = line ? el.value.split('\n').slice(0, line).join('\n').length + 1 : 0
+    el.focus()
+    el.setSelectionRange(at, at)
+    trackCaret()
+  }
+
   // Tell friends we're here (and on which line), every few seconds; leave when closing
   useEffect(() => {
     const announce = (here = true) => {
@@ -184,13 +311,13 @@ export function FocusEditor ({ g, doc }) {
   useEffect(() => {
     const key = (e) => {
       if (e.key === 'Escape' && !model.ui.modal) { e.preventDefault(); leave() }
-      if (e.ctrlKey && e.key.toLowerCase() === 'e') { e.preventDefault(); pick(view === 'write' ? 'split' : view === 'split' ? 'preview' : 'write') }
+      if (e.ctrlKey && !e.shiftKey && e.key.toLowerCase() === 'e') { e.preventDefault(); pick(view === 'write' ? 'live' : view === 'live' ? 'preview' : 'write') }
     }
     window.addEventListener('keydown', key)
     return () => window.removeEventListener('keydown', key)
   })
 
-  const pick = (v) => { setView(v); try { localStorage.setItem('od.focusView', v) } catch {} }
+  const closeGuide = () => { setGuide(false); try { localStorage.setItem('od.mdGuideSeen', '1') } catch {} }
   const rename = () => {
     const n = name.trim()
     if (n && n !== doc.name) act(() => append(g.id, 'doc.set', { id: doc.id, name: n.slice(0, 80) }))
@@ -202,6 +329,16 @@ export function FocusEditor ({ g, doc }) {
     const info = await api.importData(file, 'text/markdown', new TextEncoder().encode(doc.text.text()))
     await api.saveBlob(info.h, file)
   })
+  const onKeyDown = (e) => {
+    const id = toolForKey(e)
+    if (id) { e.preventDefault(); apply(TOOLS.find(t => t.id === id)); return }
+    if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.altKey && !composing.current) {
+      const el = e.currentTarget
+      const res = continueList({ text: el.value, start: el.selectionStart, end: el.selectionEnd })
+      if (res) { e.preventDefault(); applyResult(res); return }
+    }
+    if (!e.ctrlKey && !e.altKey && e.key.length === 1) setCalm(true)
+  }
 
   const here = model.docPresence(g.id, doc.id)
   const typing = here.filter(p => p.typing)
@@ -216,17 +353,26 @@ export function FocusEditor ({ g, doc }) {
         <div class="focus-people" title=${here.length ? here.map(p => model.memberName(g, p.key) + (p.line ? ' · line ' + p.line : '')).join('\n') : 'Only you are here'}>
           ${here.slice(0, 5).map(p => html`<${Avatar} key=${p.key} name=${model.memberName(g, p.key)} color=${model.memberColor(g, p.key)} src=${model.memberAvatar(g, p.key)} size=${26} speaking=${p.typing} />`)}
         </div>
-        <div class="seg focus-views">
-          ${[['write', 'Write'], ['split', 'Split'], ['preview', 'Preview']].map(([v, l]) => html`<button key=${v} class=${view === v ? 'active' : ''} onClick=${() => pick(v)}>${l}</button>`)}
+        <div class="seg focus-views" title="Ctrl+E switches">
+          ${VIEWS.map(([v, l]) => html`<button key=${v} class=${view === v ? 'active' : ''} onClick=${() => pick(v)}>${l}</button>`)}
         </div>
         <button class="icon-btn" title="Save as .md file" onClick=${exportMd}><${Icon} name="download" size=${18} /></button>
       </header>
       <div class="focus-body view-${view}">
-        <textarea ref=${area} class="focus-text" spellcheck="true" placeholder="Start writing… (Markdown works: # headings, **bold**, - lists)"
-          defaultValue=${text} onInput=${onInput}
-          onKeyDown=${(e) => { if (!e.ctrlKey && !e.altKey && e.key.length === 1) setCalm(true) }}
+        <nav class="focus-tools" aria-label="Formatting">
+          ${TOOLS.map((t, i) => t.sep
+            ? html`<i key=${'s' + i} class="ft-sep" />`
+            : html`<button key=${t.id} class="ft-btn" data-tool=${t.id} aria-label=${t.label} title=${`${t.label}${t.keys ? ' (' + t.keys + ')' : ''}\n${t.hint}`}
+                onMouseDown=${(e) => e.preventDefault()} onClick=${() => apply(t)}><${Icon} name=${t.icon} size=${18} /></button>`)}
+          <span class="spacer" />
+          <button class="ft-btn ${guide ? 'on' : ''}" aria-label="Formatting guide" title="How formatting works" onClick=${() => guide ? closeGuide() : setGuide(true)}><${Icon} name="help" size=${18} /></button>
+        </nav>
+        ${guide && html`<${Guide} onUse=${apply} onClose=${closeGuide} />`}
+        <textarea ref=${area} class="focus-text" spellcheck="true" placeholder="Start writing…"
+          defaultValue=${text} onInput=${onInput} onKeyDown=${onKeyDown} onKeyUp=${trackCaret} onClick=${trackCaret} onScroll=${syncScroll}
           onCompositionStart=${() => { composing.current = true }} onCompositionEnd=${(e) => { composing.current = false; onInput(e) }} />
-        ${view !== 'write' && html`<div class="focus-preview">${text.trim() ? html`<${MarkdownView} text=${text} />` : html`<p class="dim">Nothing to preview yet.</p>`}</div>`}
+        ${view !== 'write' && html`<${LivePreview} text=${text} current=${view === 'live' ? current : -1} onPick=${(line) => { if (view === 'preview') pick('live'); setTimeout(() => jumpTo(line), 0) }}
+          onTask=${(line, n) => { const el = area.current; const at = [el.selectionStart, el.selectionEnd]; applyResult({ text: toggleTask(el.value, line, n), start: at[0], end: at[1] }) }} refEl=${preview} />`}
       </div>
       <footer class="focus-foot">
         <span>${words(text)} words</span>

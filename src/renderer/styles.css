@@ -1378,14 +1378,14 @@ html[data-theme=xp] .focus-mode::before { background: var(--xp-content); }
 .focus-people .avatar { margin-left: -6px; }
 .focus-views { margin: 0; }
 .focus-views button { padding: 4px 10px; font-size: 12.5px; }
-.focus-body { flex: 1; min-height: 0; display: flex; justify-content: center; gap: 0; }
+.focus-body { flex: 1; min-height: 0; display: flex; justify-content: center; gap: 0; position: relative; padding-left: 52px; }
 .focus-text {
   flex: 1; max-width: 760px; height: 100%; resize: none; border: 0 !important; outline: none; box-shadow: none !important; background: transparent !important; border-radius: 0;
   padding: 6vh 32px 40vh; font: 17px/1.75 var(--focus-font, var(--font)); color: var(--text-0); caret-color: var(--accent); letter-spacing: 0.005em; user-select: text;
 }
 .focus-text::placeholder { color: var(--text-3); }
-.focus-preview { flex: 1; max-width: 760px; overflow-y: auto; padding: 6vh 32px 30vh; color: var(--text-1); font-size: 16px; line-height: 1.7; user-select: text; }
-.focus-body.view-split .focus-text { border-right: 1px solid var(--border) !important; }
+.focus-preview { flex: 1; max-width: 760px; overflow-y: auto; padding: 6vh 28px 40vh; color: var(--text-1); font-size: 16px; line-height: 1.7; user-select: text; }
+.focus-body.view-live .focus-text { border-right: 1px solid var(--border) !important; }
 .focus-body.view-preview .focus-text { display: none; }
 .focus-foot { height: 34px; flex: none; display: flex; align-items: center; gap: 16px; padding: 0 20px; font-size: 12px; color: var(--text-3); transition: opacity 0.4s; }
 .focus-typing { color: var(--accent); }
@@ -1395,4 +1395,47 @@ html[data-theme=xp] .focus-mode::before { background: var(--xp-content); }
 .focus-mode.calm .focus-bar:hover, .focus-mode.calm .focus-foot:hover { opacity: 1; }
 html.focus-on .toast:not(.error) { display: none; }
 html.focus-on .backdrop i { animation-play-state: paused; }
-@media (max-width: 1100px) { .focus-body.view-split .focus-preview { display: none; } }
+@media (max-width: 1100px) { .focus-body.view-live .focus-guide ~ .focus-preview { display: none; } }
+
+/* the live preview: the document block by block; the one you're writing in is marked */
+.fp-block { position: relative; padding: 2px 10px; margin: 0 -10px; border-radius: 8px; cursor: text; transition: background 0.15s, box-shadow 0.15s; }
+.fp-block + .fp-block { margin-top: 10px; }
+.fp-block:hover { background: var(--bg-3); }
+.fp-block.current { background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); }
+.fp-block .md-doc > :first-child { margin-top: 0; }
+.fp-block .md-doc > :last-child { margin-bottom: 0; }
+.fp-empty { display: flex; flex-direction: column; gap: 6px; color: var(--text-3); padding: 12px 0; }
+.fp-empty b { color: var(--text-2); font-weight: 600; }
+.fp-empty .icon { display: inline-block; vertical-align: -2px; }
+
+/* formatting buttons down the left edge */
+.focus-tools { position: absolute; left: 8px; top: 8px; bottom: 8px; width: 40px; display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 6px 0; border-radius: 12px; background: var(--bg-3); transition: opacity 0.4s; z-index: 2; }
+.ft-btn { width: 32px; height: 32px; border: 0; border-radius: 8px; background: transparent; color: var(--text-2); display: grid; place-items: center; padding: 0; }
+.ft-btn:hover { background: var(--bg-4); color: var(--text-0); }
+.ft-btn.on { background: var(--accent); color: var(--accent-ink); }
+.ft-sep { width: 20px; height: 1px; background: var(--border); margin: 5px 0; flex: none; }
+.focus-tools .spacer { flex: 1; }
+.focus-mode.calm .focus-tools { opacity: 0.15; }
+.focus-mode.calm .focus-tools:hover { opacity: 1; }
+html[data-theme=minimal] .ft-sep { background: var(--bg-4); }
+
+/* the guide: what each button does, with what you type and what you get */
+.focus-guide { width: 300px; flex: none; overflow-y: auto; padding: 14px 16px 30px; margin: 8px 0 8px 4px; border-radius: 12px; background: var(--bg-3); color: var(--text-1); font-size: 13px; animation: slide-in 0.16s ease-out; }
+.focus-guide > header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; color: var(--text-0); font-size: 14px; }
+.focus-guide > p { margin: 0 0 12px; color: var(--text-2); line-height: 1.5; }
+.fg-item { padding: 10px 0; border-top: 1px solid var(--border); display: grid; gap: 5px; }
+.fg-head { display: flex; align-items: center; gap: 7px; color: var(--text-0); }
+.fg-head kbd { margin-left: auto; }
+.fg-item small { color: var(--text-2); line-height: 1.45; }
+.fg-example { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.fg-src { margin: 0; padding: 6px 8px; border-radius: 6px; background: var(--bg-0); font: 12px/1.45 var(--mono); color: var(--text-1); white-space: pre-wrap; overflow-wrap: anywhere; }
+.fg-out { padding: 6px 8px; border-radius: 6px; background: var(--bg-0); font-size: 12.5px; line-height: 1.45; overflow: hidden; }
+.fg-out .md-doc > * { margin: 0 !important; }
+.fg-out .md-doc :is(h1, h2, h3) { font-size: 15px; border: 0; padding: 0; }
+.fg-out .md-doc :is(ul, ol) { padding-left: 18px; }
+.fg-out .md-doc table { font-size: 11.5px; }
+.fg-out .md-doc hr { margin: 4px 0 !important; }
+.fg-item .btn.sm { justify-self: start; height: 26px; }
+.fp-block li.task { cursor: pointer; }
+.fp-block li.task > input { pointer-events: none; }
+.fp-block li.task:hover > input { outline: 2px solid var(--accent-soft); }

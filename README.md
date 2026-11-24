@@ -124,9 +124,15 @@ Tips:
 - **Focus docs** (in every group's channel list, and in the header of a private chat) are shared
   documents. Open one and the whole window becomes a quiet writing page: no panels, no bars, and
   even the little toolbar fades while you type. Everyone who opens it types in the same text at
-  the same time and sees who else is there. *Split* or *Preview* (`Ctrl+E`) shows the Markdown
-  rendered; you can open a `.md` file as a new document and save any document as one. `Esc`
-  leaves.
+  the same time and sees who else is there. You can open a `.md` file as a new document and save
+  any document as one. `Esc` leaves.
+  - **Live** (the default) shows the formatted result next to what you type, and marks the part
+    you're writing in; *Preview* shows only the result, *Write* only the text (`Ctrl+E` switches).
+    Click a part of the preview to jump there; click a checkbox to tick it.
+  - **Never used Markdown?** The buttons on the left format the selected words: heading, bold,
+    italic, strikethrough, lists, checklist, quote, code, link, table, divider (pressing one again
+    undoes it, and `Ctrl+Z` works too). The **?** button opens a guide that shows, for each one,
+    what you type and what you get. Lists carry on by themselves when you press Enter.
 - The window is made of **floating panels** (groups, channels, chat, side panel). Drag the small
   grip above a panel onto the left or right half of another one to move it there; drag the edge of
   the channel list or side panel to resize it (it snaps to a few widths, double-click for the

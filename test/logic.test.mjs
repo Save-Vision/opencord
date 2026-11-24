@@ -814,3 +814,119 @@ test('focus docs: the model keeps documents, names, and who may delete them', ()
   m.setDocPresence('g1', B, { id: 'd1', here: false })
   assert.deepStrictEqual(m.docPresence('g1', 'd1'), [])
 })
+
+// ---- 0.6.3: formatting buttons and the live preview ----
+const md = await import('../src/renderer/lib/mdedit.js')
+// state from 'some [text] here' (the brackets mark the selection)
+const sel = (s) => { const a = s.indexOf('['); const b = s.indexOf(']') - 1; return { text: s.replace('[', '').replace(']', ''), start: a, end: b } }
+const show = (r) => r.text.slice(0, r.start) + '[' + r.text.slice(r.start, r.end) + ']' + r.text.slice(r.end)
+
+test('formatting: bold, italic and strikethrough wrap the selection, and unwrap it again', () => {
+  const tool = (id) => md.TOOLS.find(t => t.id === id)
+  let r = tool('bold').run(sel('we leave [Friday] at 9'))
+  assert.strictEqual(show(r), 'we leave **[Friday]** at 9')
+  assert.strictEqual(show(tool('bold').run(r)), 'we leave [Friday] at 9') // pressed again: undone
+  assert.strictEqual(show(tool('bold').run(sel('[**Friday**]'))), '[Friday]') // markers inside the selection
+  // spaces stay outside the markers
+  assert.strictEqual(show(tool('italic').run(sel('a[ word ]b'))), 'a *[word]* b')
+  // nothing selected: a placeholder to type over
+  r = tool('strike').run(sel('done: []'))
+  assert.strictEqual(show(r), 'done: ~~[crossed out]~~')
+})
+
+test('formatting: headings, lists, checklists and quotes work on whole lines', () => {
+  const tool = (id) => md.TOOLS.find(t => t.id === id)
+  // headings: # → ## → ### → plain
+  let r = tool('heading').run(sel('Plan[]'))
+  assert.strictEqual(r.text, '# Plan')
+  r = tool('heading').run(r); assert.strictEqual(r.text, '## Plan')
+  r = tool('heading').run(r); assert.strictEqual(r.text, '### Plan')
+  r = tool('heading').run(r); assert.strictEqual(r.text, 'Plan')
+  // several lines become a list, numbered in order; again turns them back
+  r = tool('number').run(sel('[tent\nsnacks\ngames]'))
+  assert.strictEqual(r.text, '1. tent\n2. snacks\n3. games')
+  assert.strictEqual(tool('number').run(r).text, 'tent\nsnacks\ngames')
+  // switching kinds replaces the old marker instead of stacking them
+  const all = (text) => ({ text, start: 0, end: text.length })
+  assert.strictEqual(tool('task').run(all('- tent\n- snacks')).text, '- [ ] tent\n- [ ] snacks')
+  assert.strictEqual(tool('bullet').run(all('- [ ] tent')).text, '- tent')
+  assert.strictEqual(tool('quote').run(sel('Plan\n[He said so]\nend')).text, 'Plan\n> He said so\nend')
+  // the caret stays in the line, after the new marker
+  r = tool('bullet').run(sel('first\nsec[]ond'))
+  assert.strictEqual(show(r), 'first\n- sec[]ond')
+  // blank lines between selected lines are left alone
+  assert.strictEqual(tool('bullet').run(sel('[a\n\nb]')).text, '- a\n\n- b')
+})
+
+test('formatting: links, code, tables and dividers', () => {
+  const tool = (id) => md.TOOLS.find(t => t.id === id)
+  // words selected: select the address to type
+  assert.strictEqual(show(tool('link').run(sel('see [the docs] now'))), 'see [the docs]([https://]) now')
+  // an address selected: select the words to type
+  assert.strictEqual(show(tool('link').run(sel('[https://example.com]'))), '[[link text]](https://example.com)')
+  assert.strictEqual(show(tool('code').run(sel('run [npm test] now'))), 'run `[npm test]` now')
+  assert.strictEqual(tool('code').run(sel('[a\nb]')).text, '```\na\nb\n```\n')
+  // blocks get blank lines around them
+  const t = tool('table').run(sel('Packing:[]'))
+  assert.ok(t.text.startsWith('Packing:\n\n| Column 1 | Column 2 |\n| --- | --- |\n'), t.text)
+  assert.strictEqual(t.text.slice(t.start, t.end), 'Column 1')
+  assert.strictEqual(tool('divider').run(sel('above[]\nbelow')).text, 'above\n\n---\n\nbelow')
+})
+
+test('formatting: keyboard shortcuts', () => {
+  const k = (key, code, extra = {}) => md.toolForKey({ ctrlKey: true, shiftKey: false, altKey: false, key, code, ...extra })
+  assert.strictEqual(k('b', 'KeyB'), 'bold')
+  assert.strictEqual(k('I', 'KeyI'), 'italic')
+  assert.strictEqual(k('k', 'KeyK'), 'link')
+  // Ctrl+Shift+8 on a German keyboard sends "(": the physical key decides
+  assert.strictEqual(k('(', 'Digit8', { shiftKey: true }), 'bullet')
+  assert.strictEqual(k('&', 'Digit7', { shiftKey: true }), 'number')
+  assert.strictEqual(k('X', 'KeyX', { shiftKey: true }), 'strike')
+  assert.strictEqual(k('z', 'KeyZ'), null)
+  assert.strictEqual(md.toolForKey({ ctrlKey: false, key: 'b', code: 'KeyB' }), null)
+  // every button explains itself and shows an example
+  for (const t of md.TOOLS.filter(x => !x.sep)) assert.ok(t.label && t.hint && t.md && t.icon && typeof t.run === 'function', t.id)
+})
+
+test('live preview: the document splits into blocks, never inside a code block', () => {
+  const doc = '# Plan\n\nWe leave Friday.\nBack Sunday.\n\n```\ncode\n\nmore code\n```\n\n- tent\n- snacks'
+  const blocks = md.splitBlocks(doc)
+  assert.deepStrictEqual(blocks.map(b => b.line), [0, 2, 5, 11])
+  assert.strictEqual(blocks[2].text, '```\ncode\n\nmore code\n```')
+  // which block the caret is in, by line
+  assert.strictEqual(md.blockAt(blocks, 0), 0)
+  assert.strictEqual(md.blockAt(blocks, 3), 1)
+  assert.strictEqual(md.blockAt(blocks, 4), 1) // a blank line belongs to the block above
+  assert.strictEqual(md.blockAt(blocks, 8), 2)
+  assert.strictEqual(md.blockAt(blocks, 99), 3)
+  assert.strictEqual(md.blockAt([], 0), -1)
+  assert.deepStrictEqual(md.splitBlocks(''), [])
+  // the smallest change, so a button goes through the editor's own undo
+  assert.deepStrictEqual(md.diffSpan('we leave Friday!', 'we leave **Friday**!'), { from: 9, to: 15, insert: '**Friday**' })
+  assert.deepStrictEqual(md.diffSpan('a **b** c', 'a b c'), { from: 2, to: 7, insert: 'b' })
+  assert.deepStrictEqual(md.diffSpan('same', 'same'), { from: 4, to: 4, insert: '' })
+})
+
+test('formatting: Enter continues a list, and ends it on an empty item', () => {
+  const at = (text) => ({ text, start: text.length, end: text.length })
+  assert.deepStrictEqual(md.continueList(at('- tent')), { text: '- tent\n- ', start: 9, end: 9 })
+  assert.strictEqual(md.continueList(at('- [x] tent')).text, '- [x] tent\n- [ ] ')
+  assert.strictEqual(md.continueList(at('9. ninth')).text, '9. ninth\n10. ')
+  assert.strictEqual(md.continueList(at('  - nested')).text, '  - nested\n  - ')
+  assert.strictEqual(md.continueList(at('> quoted')).text, '> quoted\n> ')
+  // an empty item ends the list
+  assert.deepStrictEqual(md.continueList(at('- tent\n- ')), { text: '- tent\n', start: 7, end: 7 })
+  // not in a list, a selection, or the caret before the marker: a normal Enter
+  assert.strictEqual(md.continueList(at('just text')), null)
+  assert.strictEqual(md.continueList({ text: '- tent', start: 2, end: 4 }), null)
+  assert.strictEqual(md.continueList({ text: '- tent', start: 1, end: 1 }), null)
+})
+
+test('live preview: clicking a checkbox ticks it in the text', () => {
+  const doc = '# Packing\n\n- [ ] tent\n- [x] snacks\n  - [ ] chips\n\n- [ ] other list'
+  assert.strictEqual(md.toggleTask(doc, 2, 0), doc.replace('- [ ] tent', '- [x] tent'))
+  assert.strictEqual(md.toggleTask(doc, 2, 1), doc.replace('- [x] snacks', '- [ ] snacks'))
+  assert.strictEqual(md.toggleTask(doc, 2, 2), doc.replace('- [ ] chips', '- [x] chips'))
+  assert.strictEqual(md.toggleTask(doc, 2, 3), doc) // only this block's checkboxes
+  assert.strictEqual(md.toggleTask(doc, 6, 0), doc.replace('- [ ] other', '- [x] other'))
+})
