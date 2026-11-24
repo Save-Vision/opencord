@@ -260,7 +260,9 @@ try {
   await alice.getByRole('button', { name: 'Network', exact: true }).click()
   await alice.locator('.net-item', { hasText: 'connected' }).first().waitFor({ timeout: 10000 })
   console.log('   connection check:', (await alice.locator('.net-item b').allTextContents()).join(' | '))
-  const version = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).version
+  // the running app's own version: CI builds it with the release number, not package.json's
+  const version = await alice.evaluate(() => window.__od.model.version)
+  if (!/^\d+\.\d+\.\d+$/.test(version || '')) throw new Error('app reports no version: ' + version)
   await alice.locator('table.peers td', { hasText: version }).waitFor({ timeout: 5000 })
   await alice.getByRole('button', { name: 'Updates', exact: true }).click()
   console.log('   updates tab:', (await alice.locator('.update-status').textContent()).trim())
