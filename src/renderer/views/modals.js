@@ -2,7 +2,7 @@ import { html, useState, useEffect, useRef } from '../vendor/preact-htm.js'
 import { api, model, voice, act, append, rid, saveSettings, blobUrl, COLORS, fmtRate, fmtBytes, initials, cleanErr } from '../lib/core.js'
 import { MAX_FOLDER_DEPTH } from '../lib/model.js'
 import { loadClaudeInfo } from '../lib/claude.js'
-import { SCREEN_PRESETS } from '../lib/voice.js'
+import { SCREEN_PRESETS, playTone } from '../lib/voice.js'
 import { getMic, stopMic, noiseMode, isDenoised } from '../lib/denoise.js'
 import { extOf } from '../lib/highlight.js'
 import { Icon } from '../lib/icons.js'
@@ -14,6 +14,9 @@ import { restartForUpdate, updateStatusText } from './updates.js'
 import { EventModal, TaskModal } from './planner.js'
 import { addFriendByCode } from './friends.js'
 import { NewGameModal } from './games.js'
+import { PollModal } from './polls.js'
+import { AddSoundModal } from './soundboard.js'
+import { BackupModal, RestoreModal, AccountSettings } from './account.js'
 import { folderOptions, folderFits } from './sidebar.js'
 
 export function Modal ({ title, children, wide = false, onClose = () => model.closeModal() }) {
@@ -50,7 +53,11 @@ export function Modals () {
     openLink: OpenLinkModal,
     folder: FolderModal,
     newGame: NewGameModal,
-    groupClaude: GroupClaudeModal
+    groupClaude: GroupClaudeModal,
+    poll: PollModal,
+    addSound: AddSoundModal,
+    backup: BackupModal,
+    restore: RestoreModal
   }[m.name]
   return C ? html`<${C} ...${m.props} />` : null
 }
@@ -624,13 +631,14 @@ function MicMeter ({ audio }) {
 
 function SettingsModal ({ tab: initialTab = 'profile' }) {
   const [tab, setTab] = useState(initialTab)
-  const tabs = [['profile', 'My profile'], ['voice', 'Voice & audio'], ['screen', 'Screen share'], ['claude', 'Claude'], ['network', 'Network'], ['storage', 'Storage'], ['privacy', 'Privacy & security'], ['updates', 'Updates']]
+  const tabs = [['profile', 'My profile'], ['account', 'Account & backup'], ['voice', 'Voice & audio'], ['screen', 'Screen share'], ['claude', 'Claude'], ['network', 'Network'], ['storage', 'Storage'], ['privacy', 'Privacy & security'], ['updates', 'Updates']]
   return html`
     <${Modal} title="Settings" wide>
       <div class="settings">
         <nav>${tabs.map(([k, label]) => html`<button key=${k} class=${tab === k ? 'active' : ''} onClick=${() => setTab(k)}>${label}</button>`)}</nav>
         <div class="settings-body">
           ${tab === 'profile' && html`<${ProfileSettings} />`}
+          ${tab === 'account' && html`<${AccountSettings} />`}
           ${tab === 'voice' && html`<${VoiceSettings} />`}
           ${tab === 'screen' && html`<${ScreenSettings} />`}
           ${tab === 'claude' && html`<${ClaudeSettings} />`}
@@ -674,7 +682,16 @@ export function ProfileEditor ({ onSaved, cta = 'Save' }) {
 }
 
 function ProfileSettings () {
-  return html`<h4>My profile</h4><${ProfileEditor} onSaved=${() => model.toast('Profile updated')} />`
+  const autoAway = Number(model.settings.autoAway) || 0
+  return html`
+    <h4>My profile</h4><${ProfileEditor} onSaved=${() => model.toast('Profile updated')} />
+    <h4>Status</h4>
+    <label>Turn "Online" into "Away" after
+      <select value=${autoAway} onChange=${(e) => saveSettings({ autoAway: Number(e.target.value) })}>
+        ${[[0, 'Never'], [5, '5 minutes'], [10, '10 minutes'], [15, '15 minutes'], [30, '30 minutes'], [60, '1 hour']].map(([v, l]) => html`<option value=${v}>${l} without input</option>`)}
+      </select>
+    </label>
+    <p class="hint">Set your status by clicking your picture at the bottom left. "Appear offline" hides you from friends' lists; your app still syncs messages in the background.</p>`
 }
 
 function VoiceSettings () {
@@ -726,7 +743,24 @@ function VoiceSettings () {
         <option value="192000">192 kbps — studio</option>
       </select>
     </label>
-    <p class="hint">Applies to calls you join after changing it. Shortcuts while in a call: <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>F9</kbd> mute, <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>F10</kbd> deafen (work even when the app is in the background).</p>`
+    <p class="hint">Applies to calls you join after changing it. Shortcuts while in a call: <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>F9</kbd> mute, <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>F10</kbd> deafen (work even when the app is in the background).</p>
+    <${SoundSettings} />`
+}
+
+function SoundSettings () {
+  const s = model.settings.sounds || {}
+  const set = (patch) => saveSettings({ sounds: patch })
+  return html`
+    <h4>Sounds</h4>
+    <${Toggle} label="Join and leave sounds" hint="When you or someone else joins or leaves your voice channel, mutes or unmutes" checked=${s.voice !== false} onChange=${(v) => { set({ voice: v }); if (v) playTone('connect') }} />
+    <label>Sound volume
+      <input type="range" min="0" max="1" step="0.05" value=${s.volume ?? 0.6} onInput=${(e) => { model.settings.sounds = { ...s, volume: +e.target.value } }} onChange=${(e) => { set({ volume: +e.target.value }); playTone('join') }} />
+    </label>
+    <${Toggle} label="Soundboard" hint="Hear clips people play from the soundboard in your calls (and show the soundboard button)" checked=${s.soundboard !== false} onChange=${(v) => set({ soundboard: v })} />
+    ${s.soundboard !== false && html`
+      <label>Soundboard volume
+        <input type="range" min="0" max="1" step="0.05" value=${s.soundboardVolume ?? 0.7} onChange=${(e) => set({ soundboardVolume: +e.target.value })} />
+      </label>`}`
 }
 
 function ScreenSettings () {
@@ -988,9 +1022,12 @@ function PrivacySettings () {
       <li><${Icon} name="shield" size=${18} /><div><b>Authenticity</b><small>Every message, edit and reaction is signed with the author's Ed25519 key, so nobody can forge or alter them while relaying.</small></div></li>
       <li><${Icon} name="speaker" size=${18} /><div><b>Calls & screen share</b><small>WebRTC DTLS-SRTP, directly between you. The DTLS fingerprints are exchanged over the authenticated channel, so no one can man-in-the-middle a call.</small></div></li>
       <li><${Icon} name="micOff" size=${18} /><div><b>Nobody listens in</b><small>Your microphone only opens when you join a voice channel. While you're muted it's taken off every connection, so no sound leaves your PC, whatever the other side's app does. Your app only connects to people who are listed in the channel, and your screen only goes to people who appear as watching it.</small></div></li>
-      <li><${Icon} name="sparkle" size=${18} /><div><b>Claude</b><small>Only when someone writes @claude does their app send the recent messages of that chat to Anthropic, with their own API key. Admins can turn this off per group.</small></div></li>
-      <li><${Icon} name="file" size=${18} /><div><b>On disk</b><small>History is stored unencrypted in your user profile folder, like most desktop apps. Protect your device with disk encryption (BitLocker/FileVault).</small></div></li>
+      <li><${Icon} name="sparkle" size=${18} /><div><b>Claude</b><small>Only when someone writes @claude (or replies to Claude) does their app send recent messages of that chat to Anthropic, with their own API key: their own messages, Claude's answers to them, and messages of people who allowed it below. Admins can turn Claude off per group.</small></div></li>
+      <li><${Icon} name="file" size=${18} /><div><b>On disk</b><small>History is stored unencrypted in your user profile folder, like most desktop apps. Your secret key is encrypted with ${model.platform === 'win32' ? 'Windows' : 'the system'}' keychain${model.me.sealed ? '' : ' (not available on this PC, so it is stored as is)'}. Protect your device with disk encryption (BitLocker/FileVault).</small></div></li>
     </ul>
+    <h4>Claude</h4>
+    <${Toggle} label="Claude may read my messages" hint="When a friend asks @claude something, your recent messages in that chat are sent to Anthropic with theirs, so Claude has the whole conversation. Off: Claude only sees what the person asking wrote." checked=${!!model.me.claude}
+      onChange=${async (v) => { const me = await act(() => api.setProfile({ claude: v })); if (me) { model.me = me; model.emit() } }} />
     <h4>Link previews</h4>
     <${Toggle} label="Show previews for links I send" hint="Your app loads the page once when you send the message and attaches a small preview. Friends' apps never contact the site, so they don't reveal their IP address to it." checked=${model.settings.linkPreviews !== false} onChange=${(v) => saveSettings({ linkPreviews: v })} />
     <h4>Your public key</h4>

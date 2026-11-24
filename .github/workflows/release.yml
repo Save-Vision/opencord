@@ -1,6 +1,8 @@
 name: Release
 
-# Every push to main builds the Windows app and publishes it as a GitHub release.
+# Every push to main tests and builds the Windows app and publishes it as a GitHub release.
+# Nothing is released unless the unit tests and the two-app end-to-end test (run against the
+# built app itself) pass.
 # Installed copies of OpenDiscord find it within a few hours (or via Settings → Updates)
 # and update themselves.
 #
@@ -76,7 +78,23 @@ jobs:
             -c.publish.owner="${RELEASES_REPO%%/*}" \
             -c.publish.repo="${RELEASES_REPO##*/}"
 
+      # Two copies of the built app chat, call, share screens, play and restore a backup on a
+      # private test network. Calls and timing on shared runners can be flaky: one retry.
+      - name: End-to-end test (the built app)
+        env:
+          OD_EXE: dist/win-unpacked/OpenDiscord.exe
+        run: npm run test:e2e || (echo "Retrying once…" && npm run test:e2e)
+
+      - name: Keep screenshots of a failed run
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-screenshots
+          path: test/screenshots/
+          retention-days: 14
+
       - name: Publish release
+        if: github.ref == 'refs/heads/main'
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |

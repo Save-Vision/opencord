@@ -6,6 +6,8 @@ import { START, fromFen, play, findMove, legalMoves, inCheck, sqName, colorOf, c
 import { TIME_CONTROLS, tcLabel, clockLeft, moveLeft, winnerOf, REASONS } from '../lib/games.js'
 import { Avatar } from './chat.js'
 import { Modal } from './modals.js'
+import { PokerCard, PokerTable, PokerOptions, pokerStatus, pokerRowInfo } from './poker.js'
+import { playTone } from '../lib/sounds.js'
 
 // Filled glyphs for both colours (the CSS paints white pieces white with a dark outline).
 // U+FE0E asks for the text form, so no font turns the pawn into an emoji.
@@ -18,6 +20,7 @@ const sideOf = (st, key) => key && key === st.white ? 'w' : key && key === st.bl
 // "Bob won by checkmate", "Draw by agreement", "White to move"
 export function gameStatus (g, st) {
   if (st.status === 'missing') return 'This game is gone'
+  if (st.kind === 'poker') return pokerStatus(g, st)
   if (st.status === 'open') {
     if (st.info.opp) return st.info.opp === model.me.key ? `${model.memberName(g, st.by)} challenged you` : `Waiting for ${model.memberName(g, st.info.opp)} to accept`
     return st.by === model.me.key ? 'Waiting for someone to join' : 'Open: anyone can join'
@@ -56,6 +59,7 @@ function MiniBoard ({ pos, flipped = false, last = null, size = 120 }) {
 export function GameCard ({ g, m }) {
   const st = model.gameState(g, m.id)
   if (!st || st.status === 'missing') return null
+  if (st.kind === 'poker') return html`<${PokerCard} g=${g} m=${m} />`
   const me = model.me.key
   const mine = sideOf(st, me)
   const last = st.plies[st.plies.length - 1]
@@ -89,13 +93,14 @@ export function GameCard ({ g, m }) {
 
 export function GamesView ({ g }) {
   const id = model.ui.games?.id
+  if (id && g.games.get(id)?.info?.kind === 'poker') return html`<${PokerTable} key=${id} g=${g} id=${id} />`
   return id ? html`<${GameBoardView} key=${id} g=${g} id=${id} />` : html`<${GamesHub} g=${g} />`
 }
 
 function GamesHub ({ g }) {
   const all = model.gamesOf(g)
   const turn = all.filter(x => model.isMyTurn(x.st))
-  const playing = all.filter(x => x.st.status === 'active' && !model.isMyTurn(x.st))
+  const playing = all.filter(x => (x.st.status === 'active' || x.st.status === 'playing') && !model.isMyTurn(x.st))
   const open = all.filter(x => x.st.status === 'open' && !model.isMyTurn(x.st))
   const done = all.filter(x => x.st.status === 'over').slice(0, 30)
   const section = (label, list) => list.length > 0 && html`
@@ -108,7 +113,7 @@ function GamesHub ({ g }) {
       <header class="chat-header">
         ${g.dm && html`<button class="icon-btn" title="Back to the chat" onClick=${() => model.selectChannel(g.id, DM_TEXT)}><${Icon} name="chevronLeft" /></button>`}
         <${Icon} name="chess" size=${22} class="dim" /><h2>Games</h2>
-        <span class="header-note">Moves sync like messages: play live, or one move a day</span>
+        <span class="header-note">Chess moves sync like messages: play live, or one move a day. Poker is live.</span>
         <div class="spacer" />
         <button class="btn primary sm" onClick=${() => model.openModal('newGame', { gid: g.id })}><${Icon} name="plus" size=${15} /> New game</button>
       </header>
@@ -117,7 +122,7 @@ function GamesHub ({ g }) {
           <div class="games-empty">
             <div class="intro-icon"><${Icon} name="chess" size=${36} /></div>
             <h2>No games yet</h2>
-            <p>Challenge someone to chess. The game shows up in the chat, everyone can watch, and it keeps going while people are offline.</p>
+            <p>Challenge someone to chess, or open a poker table for the group. Games show up in the chat and everyone can watch.</p>
             <button class="btn primary" onClick=${() => model.openModal('newGame', { gid: g.id })}>Start a game</button>
           </div>`}
         ${section('Your move', turn)}
@@ -131,6 +136,17 @@ function GamesHub ({ g }) {
 function GameRow ({ g, x }) {
   const { st } = x
   const ch = g.channels.get(x.gm.ch)
+  if (st.kind === 'poker') {
+    return html`
+      <button class="game-row poker-row ${model.isMyTurn(st) ? 'your-turn' : ''}" onClick=${() => model.openGame(g.id, x.id)}>
+        <div class="gr-poker"><${Icon} name="cards" size=${34} /></div>
+        <div class="gr-info">
+          <b>${model.memberName(g, st.by)}'s poker table</b>
+          <span class="gc-status ${st.status === 'playing' ? 'active' : st.status}">${pokerStatus(g, st)}</span>
+          <small class="muted">${pokerRowInfo(g, st)}${!g.dm && ch ? ' · #' + ch.name : ''} · ${fmtStamp(x.last)}</small>
+        </div>
+      </button>`
+  }
   return html`
     <button class="game-row ${model.isMyTurn(st) ? 'your-turn' : ''}" onClick=${() => model.openGame(g.id, x.id)}>
       <${MiniBoard} pos=${st.pos} flipped=${sideOf(st, model.me.key) === 'b'} last=${st.plies[st.plies.length - 1]} size=${84} />
@@ -392,17 +408,33 @@ function Board ({ pos, flipped, last, onMove }) {
 
 // ---------------------------------------------------------------- new game
 
-export function NewGameModal ({ gid, ch: chId = null, opp: presetOpp = null }) {
+export function NewGameModal ({ gid, ch: chId = null, opp: presetOpp = null, kind: presetKind = 'chess' }) {
   const g = model.groups.get(gid)
   const texts = g ? model.orderedChannels(g, 'text') : []
   const current = g && model.currentChannel(g)
+  const [kind, setKind] = useState(presetKind === 'poker' ? 'poker' : 'chess')
   const [ch, setCh] = useState(g?.dm ? DM_TEXT : chId || current?.id || texts[0]?.id)
   const [opp, setOpp] = useState(g?.dm ? g.dm : presetOpp)
   const [side, setSide] = useState('w')
   const [tc, setTc] = useState('none')
+  const [poker, setPoker] = useState({ chips: 1000, sb: 10, bb: 20, timer: 30, seats: 6 })
   if (!g) return null
   const others = model.membersOf(g).filter(m => m.key !== model.me.key)
+  const openTable = async () => {
+    const id = rid()
+    const ok = await act(() => append(gid, 'msg', {
+      id,
+      ch,
+      text: `🃏 ${model.me.name} opened a poker table. Take a seat!`,
+      game: { kind: 'poker', ...poker }
+    }), 'Could not open the table')
+    if (!ok) return
+    await act(() => append(gid, 'poker.sit', { id }))
+    model.closeModal()
+    model.openGame(gid, id)
+  }
   const start = async () => {
+    if (kind === 'poker') return openTable()
     const id = rid()
     const mySide = side === 'r' ? (crypto.getRandomValues(new Uint8Array(1))[0] & 1 ? 'w' : 'b') : side
     const oppName = opp ? model.memberName(g, opp) : ''
@@ -417,9 +449,21 @@ export function NewGameModal ({ gid, ch: chId = null, opp: presetOpp = null }) {
     model.openGame(gid, id)
   }
   return html`
-    <${Modal} title="New chess game">
+    <${Modal} title="New game">
       <div class="modal-body new-game">
-        ${!g.dm && html`
+        <div class="seg-pick two game-kind">
+          <button class=${kind === 'chess' ? 'active' : ''} onClick=${() => setKind('chess')}><${Icon} name="chess" size=${18} /> Chess</button>
+          <button class=${kind === 'poker' ? 'active' : ''} onClick=${() => setKind('poker')}><${Icon} name="cards" size=${18} /> Poker</button>
+        </div>
+        ${kind === 'poker' && html`
+          ${!g.dm && html`
+            <label>Post in
+              <select value=${ch} onChange=${(e) => setCh(e.target.value)}>
+                ${texts.map(c => html`<option value=${c.id}>#${c.name}</option>`)}
+              </select>
+            </label>`}
+          <${PokerOptions} value=${poker} onChange=${setPoker} />`}
+        ${kind === 'chess' && !g.dm && html`
           <label>Opponent
             <select value=${opp || ''} onChange=${(e) => setOpp(e.target.value || null)}>
               <option value="">Anyone in ${model.groupName(g)} (first to join)</option>
@@ -431,6 +475,7 @@ export function NewGameModal ({ gid, ch: chId = null, opp: presetOpp = null }) {
               ${texts.map(c => html`<option value=${c.id}>#${c.name}</option>`)}
             </select>
           </label>`}
+        ${kind === 'chess' && html`
         <div class="field-label">You play</div>
         <div class="seg-pick three">
           ${[['w', 'White', '♔'], ['b', 'Black', '♚'], ['r', 'Random', '?']].map(([v, label, icon]) => html`
@@ -443,12 +488,12 @@ export function NewGameModal ({ gid, ch: chId = null, opp: presetOpp = null }) {
         </div>
         <p class="hint">${tc === 'none'
           ? 'Without a clock you can take as long as you like. The game waits while you are offline.'
-          : 'Each app measures its own player\'s time, so clocks work even when your PCs\' times differ.'}</p>
+          : 'Each app measures its own player\'s time, so clocks work even when your PCs\' times differ.'}</p>`}
       </div>
       <footer>
         <div class="spacer" />
         <button class="btn" onClick=${() => model.closeModal()}>Cancel</button>
-        <button class="btn primary" disabled=${!ch} onClick=${start}>${opp ? 'Send challenge' : 'Start game'}</button>
+        <button class="btn primary" disabled=${!ch} onClick=${start}>${kind === 'poker' ? 'Open table' : opp ? 'Send challenge' : 'Start game'}</button>
       </footer>
     <//>`
 }
@@ -458,10 +503,22 @@ export function NewGameModal ({ gid, ch: chId = null, opp: presetOpp = null }) {
 const GAME_OPS = new Set(['game.join', 'game.move', 'game.resign', 'game.draw', 'game.decline', 'game.flag', 'game.abort'])
 
 // A desktop notification when something happens in a game I play, unless I'm looking at it
+const turnSeen = new Set()
+
 export function notifyGameOps (api, gid, ops) {
   const g = model.groups.get(gid)
   if (!g) return
   const me = model.me.key
+  // poker: a sound (and a flash of the taskbar) when it becomes your turn
+  for (const id of new Set(ops.filter(op => op.k.startsWith('poker.') && Date.now() - op.t < 60000).map(op => op.d.id))) {
+    const st = model.gameState(g, id)
+    if (!st || st.kind !== 'poker' || !model.isMyTurn(st)) continue
+    const k = `${id}:${st.hand.h}:${st.hand.acts}`
+    if (turnSeen.has(k)) continue
+    turnSeen.add(k)
+    playTone('turn')
+    if (!model.ui.focused || model.ui.games?.id !== id) api.attention()
+  }
   for (const op of ops) {
     if (!GAME_OPS.has(op.k) || op.a === me || Date.now() - op.t > 2 * 60 * 1000) continue
     const id = op.d.id

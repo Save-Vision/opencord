@@ -12,6 +12,7 @@
 // connections of people who watch, so an unwatched stream costs no upload at all.
 
 import { getMic, stopMic, isDenoised } from './denoise.js'
+import { playTone, configureSounds } from './sounds.js'
 
 const SLOTS = [
   { name: 'mic', kind: 'audio' },
@@ -103,31 +104,14 @@ function pickCodec (codecs, name) {
   return { mimeType: c.mimeType, clockRate: c.clockRate, sdpFmtpLine: c.sdpFmtpLine }
 }
 
-let toneCtx = null
-export function playTone (kind) {
-  try {
-    toneCtx = toneCtx || new AudioContext()
-    const seq = { join: [523, 784], leave: [784, 523], mute: [440], unmute: [660], connect: [660, 880], ring: [784, 988, 784, 988] }[kind] || [600]
-    const t0 = toneCtx.currentTime
-    seq.forEach((f, i) => {
-      const o = toneCtx.createOscillator()
-      const gain = toneCtx.createGain()
-      o.type = 'sine'
-      o.frequency.value = f
-      gain.gain.setValueAtTime(0.0001, t0 + i * 0.09)
-      gain.gain.exponentialRampToValueAtTime(0.12, t0 + i * 0.09 + 0.015)
-      gain.gain.exponentialRampToValueAtTime(0.0001, t0 + i * 0.09 + 0.12)
-      o.connect(gain).connect(toneCtx.destination)
-      o.start(t0 + i * 0.09)
-      o.stop(t0 + i * 0.09 + 0.14)
-    })
-  } catch {}
-}
+// Join/leave/mute sounds live in sounds.js
+export { playTone }
 
 export class Voice {
   constructor ({ api, model }) {
     this.api = api
     this.model = model
+    configureSounds(() => model.settings)
     this.active = null // { gid, ch, sid }
     this.calls = new Map()
     this.local = { mic: null, screen: null, cam: null }
@@ -394,6 +378,7 @@ export class Voice {
     }
     pc.onicecandidate = (e) => { if (e.candidate) this._signal(call, { cand: e.candidate.toJSON() }) }
     pc.ontrack = (e) => this._onTrack(call, e)
+    this._openTunnel(call)
     pc.onconnectionstatechange = () => {
       call.state = pc.connectionState
       if (pc.connectionState === 'connected') {
@@ -416,8 +401,39 @@ export class Voice {
     return call
   }
 
+  // The fallback path: when no direct route works (strict NATs, firewalls that block UDP between
+  // you), the call goes through the encrypted connection the chat already has. Each app adds a
+  // made-up 'relay' candidate pointing at a local UDP port that main/network.js forwards over
+  // that connection, at the lowest priority, so WebRTC only picks it when nothing else works.
+  // It's still WebRTC's own encryption end to end; the chat connection just carries packets.
+  async _openTunnel (call) {
+    try {
+      const t = await this.api.openTunnel(call.key)
+      if (this.calls.get(call.key) !== call) return
+      call.tunnel = t
+      this._addTunnelCandidate(call)
+    } catch (err) { console.warn('[rtc] no fallback path', err) }
+  }
+
+  _addTunnelCandidate (call) {
+    const t = call.tunnel
+    const pc = call.pc
+    if (!t || !pc.remoteDescription || pc.signalingState === 'closed') return
+    const ufrag = /a=ice-ufrag:(\S+)/.exec(pc.remoteDescription.sdp)?.[1]
+    if (!ufrag || call.tunnelUfrag === ufrag) return
+    call.tunnelUfrag = ufrag
+    const mid = call.transceivers[0]?.mid ?? pc.getTransceivers()[0]?.mid ?? '0'
+    pc.addIceCandidate({
+      candidate: `candidate:odtunnel 1 udp 511 ${t.host} ${t.port} typ relay raddr ${t.host} rport ${t.port} generation 0 ufrag ${ufrag}`,
+      sdpMid: mid,
+      sdpMLineIndex: 0,
+      usernameFragment: ufrag
+    }).catch((err) => console.warn('[rtc] fallback candidate', err))
+  }
+
   _closeCall (call) {
     if (this.calls.get(call.key) === call) this.calls.delete(call.key)
+    if (![...this.calls.values()].some(c => c.key === call.key)) this.api.closeTunnel(call.key)
     try { call.pc.close() } catch {}
     for (const el of Object.values(call.audioEls)) { el.pause(); el.srcObject = null }
     const m = this.meters.get(call.key)
@@ -445,7 +461,7 @@ export class Voice {
       const preset = SCREEN_PRESETS[this.settings.screen.preset] || SCREEN_PRESETS['1080p60']
       const desc = {
         type: msg.desc.type,
-        sdp: mungeRemoteSdp(msg.desc.sdp, {
+        sdp: mungeRemoteSdp(this.model.forceRelay ? msg.desc.sdp.replace(/^a=candidate:.*\r?\n/gm, '') : msg.desc.sdp, {
           voiceBitrate: this.settings.audio.voiceBitrate || 96000,
           screenStartKbps: Math.round(Math.min(preset.kbps * 0.5, 8000))
         })
@@ -467,8 +483,11 @@ export class Voice {
       const cands = call.pendingCands
       call.pendingCands = []
       for (const c of cands) await pc.addIceCandidate(c).catch(() => {})
+      this._addTunnelCandidate(call)
       this._applyAllSenderParams(call)
     } else if (msg.cand) {
+      // tests: only the fallback path may work
+      if (this.model.forceRelay) return
       if (!pc.remoteDescription) call.pendingCands.push(msg.cand)
       else await pc.addIceCandidate(msg.cand).catch(() => {})
     }
@@ -755,6 +774,7 @@ export class Voice {
       const addr = remote?.address || remote?.ip || ''
       out.family = addr.includes(':') ? 'IPv6' : addr ? 'IPv4' : null
       const types = [local?.candidateType, remote?.candidateType]
+      // 'relay' can only be our own fallback (see _openTunnel): no TURN servers are used
       out.path = types.includes('relay') ? 'relay' : types.every(t => t === 'host') ? 'lan' : 'direct'
       out.protocol = local?.protocol
     }

@@ -6,6 +6,9 @@
 // and encrypts it with Noise (XX pattern, ed25519 static keys) + libsodium secretstream.
 // No relay is configured, so bytes only ever flow directly between friends.
 //
+// Calls (WebRTC) normally find their own direct path. When they can't (strict NATs, firewalls),
+// they fall back to this connection: see "call fallback" below.
+//
 // Authorization: being connected is not enough — each side must prove it knows the group
 // secret with an HMAC bound to this connection's Noise handshake hash.
 //
@@ -23,7 +26,14 @@ const c = require('./crypto')
 const { encodeJSON, encodeBlobChunk, FrameParser } = require('./framing')
 
 // 2 (0.4): stubs in sync, one-time invites and friend links
-const PROTOCOL_VERSION = 2
+// 3 (0.6): hello says which protocols the app still works with ('min'), and calls can run over
+//          this connection (unreliable datagrams on the same encrypted link)
+const PROTOCOL_VERSION = 3
+// The oldest protocol this app can share groups with. Raise it (to the new PROTOCOL_VERSION)
+// when a change would break older apps: they then show "Update required" and stop syncing
+// instead of misreading the group, and this app tells you who still has to update.
+const MIN_PEER_PROTOCOL = 2
+const TUNNEL = 0x4f // first byte of a datagram that carries a call's packet
 const SYNC_BATCH_BYTES = 1024 * 1024
 const BLOB_CHUNK = 64 * 1024
 const BLOB_IDLE_TIMEOUT = 30000
@@ -76,6 +86,11 @@ class Network extends EventEmitter {
     this.authTimeout = opts.authTimeout || 30000
     this.lonelyInterval = opts.lonelyInterval || 60000
     this.appVersion = typeof opts.appVersion === 'string' ? opts.appVersion : null
+    // Tests pretend to be a newer app by raising these
+    this.proto = Number.isInteger(opts.proto) ? opts.proto : PROTOCOL_VERSION
+    this.minProto = Number.isInteger(opts.minProto) ? opts.minProto : MIN_PEER_PROTOCOL
+    this.incompatible = new Map() // remoteKeyHex -> { key, version, reason, groups }: apps we can't sync with
+    this.tunnels = new Map() // remoteKeyHex -> local UDP port for a call (see call fallback)
     this.peers = new Map() // remoteKeyHex -> peer
     this.incoming = new Map() // `${peerKey}:${id}` -> transfer
     this.inflight = new Map() // hash -> Promise<path>
@@ -254,6 +269,7 @@ class Network extends EventEmitter {
 
   async stop () {
     clearInterval(this.lonelyTimer)
+    for (const key of [...this.tunnels.keys()]) this.closeTunnel(key)
     if (!this.swarm) return
     for (const p of this.peers.values()) this._cleanupPeer(p)
     await this.swarm.destroy()
@@ -343,6 +359,7 @@ class Network extends EventEmitter {
       family: peer.family,
       lan: isLanAddress(peer.host),
       version: peer.appVersion || null,
+      proto: peer.proto,
       groups: [...peer.groups],
       since: peer.connectedAt
     }
@@ -369,6 +386,8 @@ class Network extends EventEmitter {
       groups: new Set(),
       remoteTags: new Set(),
       proto: 0, // their protocol version, from hello
+      min: 0, // the oldest protocol they still work with
+      incompatible: null, // 'update-me' | 'update-them': one of us has to update first
       host: raw.remoteHost,
       family: raw.remoteFamily,
       rtt: null,
@@ -384,12 +403,15 @@ class Network extends EventEmitter {
       try { peer.parser.push(d) } catch (err) { conn.destroy(err) }
     })
     conn.on('error', () => {})
+    conn.on('message', (buf) => this._onDatagram(peer, buf))
     conn.on('close', () => this._dropPeer(peer))
     this.peers.set(key, peer)
 
-    this._send(peer, { t: 'hello', v: PROTOCOL_VERSION, app: this.appVersion, tags: this._myTags(peer) })
+    this._send(peer, { t: 'hello', v: this.proto, min: this.minProto, app: this.appVersion, tags: this._myTags(peer) })
     if (this.friendQueue.has(key)) this._sendFriend(peer)
-    peer.authTimer = setTimeout(() => { if (!peer.groups.size) conn.destroy() }, this.authTimeout)
+    // An app too old (or too new) to sync stays connected only if it proved it's in one of our
+    // groups, so we can say who has to update
+    peer.authTimer = setTimeout(() => { if (!peer.groups.size && !(peer.incompatible && this._sharedGroups(peer).length)) conn.destroy() }, this.authTimeout)
     peer.pingTimer = setInterval(() => this._send(peer, { t: 'ping', ts: Date.now() }), 5000)
   }
 
@@ -410,6 +432,7 @@ class Network extends EventEmitter {
     this._cleanupPeer(peer)
     for (const g of peer.groups) this.emit('peer-leave', g, peer.key)
     peer.groups.clear()
+    if (this.incompatible.delete(peer.key)) this.emit('compat', this.compatInfo())
     if (peer.conn.destroyed) return
     if (!graceful) return peer.conn.destroy()
     peer.conn.end()
@@ -426,7 +449,30 @@ class Network extends EventEmitter {
     return tags
   }
 
+  // Groups we share with this peer, by their membership proofs (without letting them in)
+  _sharedGroups (peer) {
+    const out = []
+    for (const g of this.store.groups.values()) {
+      for (const secret of g.epochs.values()) {
+        if (peer.remoteTags.has(c.authTag(secret, peer.hh, peer.remoteKey))) { out.push(g.id); break }
+      }
+    }
+    return out
+  }
+
+  // Apps that can't sync with us right now because one side is too old
+  compatInfo () { return [...this.incompatible.values()] }
+
   _evaluate (peer) {
+    if (peer.incompatible) {
+      const info = { key: peer.key, version: peer.appVersion || null, reason: peer.incompatible, groups: this._sharedGroups(peer) }
+      const prev = this.incompatible.get(peer.key)
+      if (info.groups.length && JSON.stringify(prev) !== JSON.stringify(info)) {
+        this.incompatible.set(peer.key, info)
+        this.emit('compat', this.compatInfo())
+      }
+      return
+    }
     for (const g of this.store.groups.values()) {
       let epoch = -1
       for (const [e, secret] of g.epochs) {
@@ -455,6 +501,9 @@ class Network extends EventEmitter {
           if (msg.t === 'hello') {
             if (typeof msg.app === 'string' && /^\d+\.\d+\.\d+[\w.-]{0,20}$/.test(msg.app)) peer.appVersion = msg.app
             peer.proto = Number.isInteger(msg.v) ? msg.v : 1
+            peer.min = Number.isInteger(msg.min) ? msg.min : 0
+            // Too far apart to share groups safely: whoever is older has to update first
+            peer.incompatible = peer.min > this.proto ? 'update-me' : peer.proto < this.minProto ? 'update-them' : null
             if (peer.proto >= 2) for (const j of this.joining.values()) this._sendRedeem(peer, j)
           }
           if (!Array.isArray(msg.tags)) return
@@ -530,6 +579,7 @@ class Network extends EventEmitter {
       switch (msg.t) {
         case 'sync': {
           if (!peer.groups.has(msg.g)) return
+          if (this.store.noteVector(msg.g, msg.vec)) this.emit('restored', msg.g)
           const missing = this.store.opsMissingFrom(msg.g, msg.vec, { stubs: peer.proto >= 2 })
           const flush = (batch) => {
             const w = this.store.wire(msg.g, batch)
@@ -551,8 +601,9 @@ class Network extends EventEmitter {
         }
         case 'ops': {
           if (!peer.groups.has(msg.g)) return
-          const { accepted, gap, membership } = this.store.ingest(msg.g, msg.ops, msg.proofs)
+          const { accepted, gap, membership, restored } = this.store.ingest(msg.g, msg.ops, msg.proofs)
           if (membership) this.membershipChanged(msg.g)
+          if (restored) this.emit('restored', msg.g)
           if (accepted.length) {
             this.emit('ops', msg.g, accepted)
             this.broadcastOps(msg.g, accepted, peer.key) // gossip to friends who may lack them
@@ -593,6 +644,70 @@ class Network extends EventEmitter {
     } catch (err) {
       this.emit('warning', err)
     }
+  }
+
+  // ---- call fallback ----
+  // WebRTC finds a direct path for a call by itself. When it can't (both behind strict NATs, a
+  // firewall that blocks UDP between you), the call can use the connection the chat already
+  // has instead, with no server anywhere: the voice code talks to a UDP port on this PC, and
+  // the packets cross as unreliable datagrams on the encrypted Hyperswarm link. WebRTC still
+  // encrypts the call end to end (DTLS-SRTP), so this link only ever carries ciphertext.
+  // Windows only delivers UDP between sockets on the same network interface, so the port
+  // listens on the address of the interface that carries internet traffic.
+  openTunnel (key) {
+    if (!/^[0-9a-f]{64}$/.test(key)) return Promise.reject(new Error('Bad key'))
+    const have = this.tunnels.get(key)
+    if (have) return have.ready
+    const t = { key, sock: dgram.createSocket('udp4'), local: null, lastLocal: 0, host: null }
+    this.tunnels.set(key, t)
+    t.ready = (async () => {
+      const route = await defaultRoute()
+      const host = route && /^\d+\.\d+\.\d+\.\d+$/.test(route.address || '') ? route.address : null
+      if (!host) throw new Error('No network interface for the call fallback')
+      t.host = host
+      await new Promise((resolve, reject) => {
+        t.sock.once('error', reject)
+        t.sock.bind(0, host, () => { t.sock.off('error', reject); resolve() })
+      })
+      t.sock.on('message', (buf, rinfo) => this._fromLocal(t, buf, rinfo))
+      t.sock.on('error', () => this.closeTunnel(key))
+      return { host, port: t.sock.address().port }
+    })()
+    t.ready.catch(() => this.closeTunnel(key))
+    return t.ready
+  }
+
+  closeTunnel (key) {
+    const t = this.tunnels.get(key)
+    if (!t) return
+    this.tunnels.delete(key)
+    try { t.sock.close() } catch {}
+  }
+
+  // A packet from our own WebRTC: only from this PC, and only from the first socket that used
+  // the port (until it goes quiet), so both ends always pair up the same way
+  _fromLocal (t, buf, rinfo) {
+    if (buf.length > 1500 || rinfo.address !== t.host) return
+    const now = Date.now()
+    if (!t.local || t.local.port !== rinfo.port) {
+      if (t.local && now - t.lastLocal < 5000) return
+      t.local = { address: rinfo.address, port: rinfo.port }
+    }
+    t.lastLocal = now
+    const peer = this.peers.get(t.key)
+    if (!peer || !peer.groups.size || peer.conn.destroyed || typeof peer.conn.trySend !== 'function') return
+    const out = Buffer.allocUnsafe(buf.length + 1)
+    out[0] = TUNNEL
+    buf.copy(out, 1)
+    try { peer.conn.trySend(out) } catch {}
+  }
+
+  // A datagram from a friend: a call packet goes to our WebRTC, if we opened a fallback for them
+  _onDatagram (peer, buf) {
+    if (!buf || buf.length < 2 || buf[0] !== TUNNEL || !peer.groups.size) return
+    const t = this.tunnels.get(peer.key)
+    if (!t || !t.local) return
+    t.sock.send(buf.subarray(1), t.local.port, t.local.address, () => {})
   }
 
   // ---- blobs ----
@@ -732,4 +847,4 @@ function importBlobBuffer (store, buf) {
   return { hash, size: buf.length }
 }
 
-module.exports = { Network, importBlobFile, importBlobBuffer, isLanAddress, defaultRoute, VPN_IFACE }
+module.exports = { Network, importBlobFile, importBlobBuffer, isLanAddress, defaultRoute, VPN_IFACE, PROTOCOL_VERSION, MIN_PEER_PROTOCOL }

@@ -280,3 +280,305 @@ test('messages: Claude answers and chess cards are recognised', () => {
   m.applyOps('g1', [raw('msg', A, { id: 'next', ch: 'gen', text: 'done', bot: { n: 'claude' } })])
   assert.strictEqual(m.claudeDraftsIn(g, 'gen').length, 0)
 })
+
+// ---------------------------------------------------------------- 0.6
+
+const poker = await import('../src/renderer/lib/poker.js')
+const { makeTable } = await import('./pokersim.mjs')
+const { transcript, claudeMayRead } = await import('../src/renderer/lib/claudelog.js')
+const { parseQuery, searchMessages } = await import('../src/renderer/lib/search.js')
+
+const card = (s) => {
+  const r = poker.RANKS.indexOf(s[0] === '1' ? 'T' : s[0])
+  const suit = { c: 0, d: 1, h: 2, s: 3 }[s[s.length - 1]]
+  return r * 4 + suit
+}
+const hand = (str) => str.split(' ').map(card)
+
+test('poker: hand ranking', () => {
+  const name = (s) => poker.bestHand(hand(s)).name
+  assert.strictEqual(name('As Ks Qs Js Ts 2d 3c'), 'Royal flush')
+  assert.strictEqual(name('5h 4h 3h 2h Ah Kd Kc'), 'Straight flush, five high')
+  assert.strictEqual(name('9c 9d 9h 9s 2c 3d 4h'), 'Four nines')
+  assert.strictEqual(name('Kc Kd Kh 2s 2c 7d 8h'), 'Full house, kings full of twos')
+  assert.strictEqual(name('Ah 9h 7h 4h 2h Kd Kc'), 'Flush, ace high')
+  assert.strictEqual(name('Ad 2c 3h 4s 5d Kd Kc'), 'Straight, five high')
+  assert.strictEqual(name('6d 6c 6h As Kd 2c 3h'), 'Three sixes')
+  assert.strictEqual(name('Jd Jc 4h 4s Ad 2c 3h'), 'Two pair, jacks and fours')
+  assert.strictEqual(name('Qd Qc 4h 8s Ad 2c 3h'), 'Pair of queens')
+  assert.strictEqual(name('Ad Jc 4h 8s 9d 2c 3h'), 'Ace high')
+  const s = (x) => poker.bestHand(hand(x)).score
+  assert.ok(s('As Ad Kc Qd 2h') > s('As Ad Kc Jd 2h'), 'kickers count')
+  assert.ok(s('6s 5d 4c 3d 2h') > s('As 2d 3c 4d 5h'), 'the wheel is the lowest straight')
+  assert.strictEqual(s('As Ad Kc Qd 2h'), s('Ah Ac Ks Qh 2d'), 'suits never break ties')
+})
+
+test('poker: three players play hands with real card crypto, chips add up', () => {
+  const T = makeTable(['alice', 'bob', 'carol'])
+  const [a, b, c] = T.players
+  for (const p of T.players) T.post(p, 'sit')
+  T.post(b, 'start', { on: true }) // not the host: ignored
+  T.post(a, 'deal', { h: 1, players: T.players.map(p => p.key) })
+  let st = T.auto()
+  assert.strictEqual(st.hand, null, 'no dealing before the host starts')
+  T.post(a, 'start', { on: true })
+  T.post(a, 'deal', { h: 1, players: T.players.map(p => p.key) })
+  st = T.auto()
+  assert.strictEqual(st.hand.stage, 'bet')
+  // everyone sees their own two cards, and they're all different
+  const holes = T.players.map(p => T.myCards(p))
+  const all = holes.flat()
+  assert.ok(all.every(x => x >= 0 && x < 52))
+  assert.strictEqual(new Set(all).size, 6)
+  // nobody else's hole cards were opened with published keys
+  for (const [i] of T.players.entries()) for (const j of poker.holeIdx(3, i)) assert.strictEqual(T.cards.get('1:' + j), undefined)
+  // blinds: button alice, small blind bob, big blind carol; alice acts first
+  assert.strictEqual(st.hand.toAct, a.key)
+  assert.strictEqual(st.hand.bets[b.key], 10)
+  assert.strictEqual(st.hand.bets[c.key], 20)
+  // an action out of turn doesn't count
+  T.post(c, 'act', { h: 1, n: st.hand.acts, act: 'fold' })
+  st = T.auto()
+  assert.ok(!st.hand.folded.has(c.key))
+  st = T.act(a, 'raise', 60)
+  st = T.act(b, 'fold')
+  st = T.act(c, 'call')
+  assert.strictEqual(st.hand.street, 1)
+  assert.strictEqual(st.hand.board.slice(0, 3).filter(x => x != null).length, 3)
+  // check it down
+  while (st.hand.stage === 'bet') st = T.act(T.players.find(p => p.key === st.hand.toAct), 'check')
+  assert.strictEqual(st.hand.stage, 'done')
+  const board = st.hand.board
+  assert.strictEqual(new Set([...board, ...holes[0], ...holes[2]]).size, 9)
+  // the showdown opened exactly the hands still in, and they match what their owners saw
+  assert.deepStrictEqual(st.hand.shown[a.key], holes[0])
+  assert.deepStrictEqual(st.hand.shown[c.key], holes[2])
+  assert.strictEqual(st.hand.shown[b.key], undefined, 'folded cards stay hidden')
+  const total = st.seats.reduce((x, s) => x + s.stack, 0)
+  assert.strictEqual(total, 3000)
+  const best = (p) => poker.bestHand([...st.hand.shown[p.key], ...board]).score
+  if (best(a) !== best(c)) assert.ok(st.hand.result.winners.includes(best(a) > best(c) ? a.key : c.key))
+  // a second deal for the same hand number is ignored, the next one rotates the button
+  T.post(b, 'deal', { h: 3, players: T.players.map(p => p.key) })
+  T.post(b, 'deal', { h: 2, players: T.players.map(p => p.key) })
+  st = T.auto()
+  assert.strictEqual(st.hand.h, 2)
+  assert.strictEqual(st.hand.players[st.hand.b], b.key)
+})
+
+test('poker: all-in side pots, short all-ins and min raises', () => {
+  const T = makeTable(['alice', 'bob', 'carol'])
+  const [a, b, c] = T.players
+  for (const p of T.players) T.post(p, 'sit')
+  T.post(a, 'start', { on: true })
+  T.post(a, 'deal', { h: 1, players: T.players.map(p => p.key) })
+  let st = T.auto()
+  // a raise below the minimum isn't allowed (unless it's all-in)
+  T.post(a, 'act', { h: 1, n: 0, act: 'raise', to: 30 })
+  st = T.auto()
+  assert.strictEqual(st.hand.acts, 0)
+  st = T.act(a, 'raise', 1000) // all-in
+  assert.ok(st.hand.allin.has(a.key))
+  st = T.act(b, 'call')
+  st = T.act(c, 'fold')
+  // both all-in: the board is dealt out without betting
+  assert.strictEqual(st.hand.stage, 'done')
+  assert.ok(st.hand.board.every(x => x != null))
+  const total = st.seats.reduce((x, s) => x + s.stack, 0)
+  assert.strictEqual(total, 3000)
+  const won = st.hand.result.won
+  assert.strictEqual(won[a.key] + won[b.key] + won[c.key], 2020)
+
+  // stacks of different sizes: the short stack can only win what it matched
+  const st2 = poker.derivePoker({
+    info: poker.cleanPokerInfo({ kind: 'poker', chips: 1000, sb: 10, bb: 20 }),
+    by: A,
+    ops: []
+  })
+  assert.strictEqual(st2.status, 'open')
+})
+
+test('poker: timeouts and stalled hands need their time, by the signed clocks', () => {
+  const T = makeTable(['alice', 'bob'], { timer: 30 })
+  const [a, b] = T.players
+  T.post(a, 'sit')
+  T.post(b, 'sit')
+  T.post(a, 'start', { on: true })
+  T.post(a, 'deal', { h: 1, players: [a.key, b.key] })
+  let st = T.auto()
+  // heads-up: the button (alice) is the small blind and acts first pre-flop
+  assert.strictEqual(st.hand.sbP, a.key)
+  assert.strictEqual(st.hand.toAct, a.key)
+  const t0 = st.hand.turnT
+  // too early: ignored
+  T.game.ops.push({ k: 'time', a: b.key, s: ++b.s, t: t0 + 5000, recv: t0 + 5000, h: 1, n: st.hand.acts })
+  st = T.derive()
+  assert.strictEqual(st.hand.acts, 0)
+  T.game.ops.push({ k: 'time', a: b.key, s: ++b.s, t: t0 + 31000, recv: t0 + 31000, h: 1, n: st.hand.acts })
+  st = T.auto()
+  assert.strictEqual(st.hand.stage, 'done', 'alice folded on time')
+  assert.strictEqual(st.hand.log.find(e => e.e === 'act').timeout, true)
+  // a stalled shuffle can be voided only after a minute, and only by someone who isn't the one stalling
+  T.post(b, 'deal', { h: 2, players: [a.key, b.key] })
+  st = T.derive()
+  assert.strictEqual(st.hand.stage, 'shuffle')
+  const shuffler = st.hand.players[0] === a.key ? a : b
+  const other = shuffler === a ? b : a
+  const t1 = st.hand.turnT
+  T.game.ops.push({ k: 'void', a: shuffler.key, s: ++shuffler.s, t: t1 + 70000, recv: t1 + 70000, h: 2 })
+  T.game.ops.push({ k: 'void', a: other.key, s: ++other.s, t: t1 + 10000, recv: t1 + 10000, h: 2 })
+  st = T.derive()
+  assert.strictEqual(st.hand.stage, 'shuffle')
+  const before = st.seats.map(s => s.stack)
+  T.game.ops.push({ k: 'void', a: other.key, s: ++other.s, t: t1 + 61000, recv: t1 + 61000, h: 2 })
+  st = T.derive()
+  assert.strictEqual(st.hand.stage, 'void')
+  assert.deepStrictEqual(st.seats.map(s => s.stack), before, 'blinds go back')
+})
+
+test('poker: a wrong card key cancels the hand instead of dealing garbage', () => {
+  const T = makeTable(['alice', 'bob'])
+  const [a, b] = T.players
+  T.post(a, 'sit')
+  T.post(b, 'sit')
+  T.post(a, 'start', { on: true })
+  T.post(a, 'deal', { h: 1, players: [a.key, b.key] })
+  let st = T.auto()
+  st = T.act(a, 'call')
+  // bob publishes a bogus key for the first flop card before the honest app does
+  const j = st.hand.boardAt[0]
+  T.post(b, 'keys', { h: 1, keys: { [j]: 'ab'.repeat(32) } })
+  st = T.act(b, 'check')
+  assert.strictEqual(st.hand.stage, 'void')
+  assert.strictEqual(st.hand.result.why, 'badkey')
+})
+
+test('polls: one vote each (the newest), multi-choice, closing and end times', () => {
+  seq = { [A]: 0, [B]: 0, [C]: 0 }
+  const m = makeModel(B)
+  const g = m.groups.get('g1')
+  m.applyOps('g1', [
+    raw('channel.create', A, { id: 'gen', name: 'general', kind: 'text' }),
+    raw('msg', A, { id: 'p1', ch: 'gen', text: '📊 Pizza?', poll: { q: 'Pizza?', opts: [{ id: '1', t: 'Yes' }, { id: '2', t: 'No' }, { id: '2', t: 'dupe' }] } }),
+    raw('msg', A, { id: 'bad', ch: 'gen', text: 'x', poll: { q: 'One option', opts: [{ id: '1', t: 'only' }] } })
+  ])
+  const p = g.msgById.get('p1')
+  assert.strictEqual(p.poll.opts.length, 2)
+  assert.strictEqual(g.msgById.get('bad').poll, null)
+  m.applyOps('g1', [
+    raw('poll.vote', B, { id: 'p1', v: ['1'] }, 100),
+    raw('poll.vote', C, { id: 'p1', v: ['1', '2'] }, 101), // single choice: only the first counts
+    raw('poll.vote', B, { id: 'p1', v: ['2'] }, 102) // changed mind
+  ])
+  let r = m.pollResults(g, p)
+  assert.deepStrictEqual(r.voters.get('1'), [C])
+  assert.deepStrictEqual(r.voters.get('2'), [B])
+  assert.deepStrictEqual(r.mine, ['2'])
+  assert.strictEqual(r.total, 2)
+  // only the author can close it; votes after that don't count
+  m.applyOps('g1', [raw('poll.close', B, { id: 'p1' }, 103), raw('poll.vote', A, { id: 'p1', v: ['1'] }, 104)])
+  r = m.pollResults(g, p)
+  assert.strictEqual(r.total, 3)
+  m.applyOps('g1', [raw('poll.close', A, { id: 'p1' }, 105), raw('poll.vote', C, { id: 'p1', v: ['2'] }, 106)])
+  r = m.pollResults(g, p)
+  assert.ok(r.ended && r.closed)
+  assert.deepStrictEqual(r.voters.get('1'), [C, A])
+})
+
+test('Claude only reads the asker, its answers to them, and people who allowed it', () => {
+  seq = { [A]: 0, [B]: 0, [C]: 0 }
+  const m = makeModel(A)
+  const g = m.groups.get('g1')
+  m.memberName = (g, k) => ({ [A]: 'Ann', [B]: 'Ben', [C]: 'Cat' })[k]
+  m.applyOps('g1', [
+    raw('channel.create', A, { id: 'gen', name: 'general', kind: 'text' }),
+    raw('profile', C, { name: 'Cat', color: '#2dd4bf', claude: true }),
+    raw('msg', B, { id: 'm1', ch: 'gen', text: 'my secret plans' }),
+    raw('msg', C, { id: 'm2', ch: 'gen', text: 'cat is fine with Claude' }),
+    raw('msg', A, { id: 'm3', ch: 'gen', text: '@claude summarize' }),
+    raw('msg', A, { id: 'm4', ch: 'gen', text: 'A summary', re: 'm3', bot: { n: 'claude', model: 'claude-opus-5-5' } }),
+    raw('msg', B, { id: 'm5', ch: 'gen', text: 'ben replies to claude', re: 'm4' }),
+    raw('msg', A, { id: 'm6', ch: 'gen', text: 'what about this?', re: 'm1' })
+  ])
+  assert.ok(!claudeMayRead(m, g, g.msgById.get('m1')))
+  assert.ok(claudeMayRead(m, g, g.msgById.get('m2')))
+  let log = transcript(m, g, g.msgById.get('m3'))
+  assert.ok(!log.text.includes('secret'), 'other people are left out')
+  assert.ok(log.text.includes('cat is fine with Claude'))
+  assert.ok(log.text.includes('summarize'))
+  assert.strictEqual(log.skipped, 1)
+  // replying to a message shows Claude that one message, on purpose
+  log = transcript(m, g, g.msgById.get('m6'))
+  assert.ok(log.text.includes('my secret plans'))
+  assert.ok(log.text.includes('A summary'))
+  assert.ok(!log.text.includes('ben replies'))
+  // Ben asks by replying to Claude: Ann's messages and Claude's answers to her stay out
+  const mb = makeModel(B)
+  const gb = mb.groups.get('g1')
+  seq = { [A]: 0, [B]: 0, [C]: 0 }
+  mb.applyOps('g1', [
+    raw('channel.create', A, { id: 'gen', name: 'general', kind: 'text' }),
+    raw('msg', A, { id: 'x1', ch: 'gen', text: 'ann private' }),
+    raw('msg', A, { id: 'x2', ch: 'gen', text: 'answer for ann', re: 'x1', bot: { n: 'claude' } }),
+    raw('msg', B, { id: 'x3', ch: 'gen', text: 'ben asks', re: 'x2' })
+  ])
+  log = transcript(mb, gb, gb.msgById.get('x3'))
+  assert.ok(log.text.includes('answer for ann'), 'the message replied to')
+  assert.ok(!log.text.includes('ann private'), 'but not the chain behind someone else\'s message')
+})
+
+test('search: words, people, channels and filters', () => {
+  seq = { [A]: 0, [B]: 0, [C]: 0 }
+  const m = makeModel(A)
+  const g = m.groups.get('g1')
+  m.memberName = (g, k) => ({ [A]: 'Ann', [B]: 'Bén', [C]: 'Cat' })[k]
+  m.applyOps('g1', [
+    raw('channel.create', A, { id: 'gen', name: 'general', kind: 'text' }),
+    raw('channel.create', A, { id: 'mc', name: 'minecraft', kind: 'text' }),
+    raw('msg', B, { id: 's1', ch: 'gen', text: 'Café tonight?' }, Date.parse('2026-03-01')),
+    raw('msg', A, { id: 's2', ch: 'mc', text: 'new world at https://example.com' }, Date.parse('2026-03-02')),
+    raw('msg', C, { id: 's3', ch: 'mc', text: 'pic', att: [{ h: 'f'.repeat(64), s: 10, n: 'base.png', m: 'image/png' }] }, Date.parse('2026-03-03'))
+  ])
+  const ids = (q) => searchMessages(m, g, q).map(x => x.id)
+  assert.deepStrictEqual(ids('cafe'), ['s1'])
+  assert.deepStrictEqual(ids('from:ben'), ['s1'])
+  assert.deepStrictEqual(ids('from:me'), ['s2'])
+  assert.deepStrictEqual(ids('in:#mine'), ['s3', 's2'])
+  assert.deepStrictEqual(ids('has:link'), ['s2'])
+  assert.deepStrictEqual(ids('has:image base'), ['s3'])
+  assert.deepStrictEqual(ids('after:2026-03-01 before:2026-03-03'), ['s2'])
+  assert.deepStrictEqual(ids(''), [])
+  assert.deepStrictEqual(parseQuery('from:"Ann B" hello').from, ['ann b'])
+})
+
+test('status and soundboard: what friends announce, who may remove a sound', () => {
+  seq = { [A]: 0, [B]: 0, [C]: 0 }
+  const m = makeModel(A)
+  const g = m.groups.get('g1')
+  m.settings = { status: 'online', autoAway: 10 }
+  m.peerJoin('g1', B, { key: B })
+  assert.strictEqual(m.presence(g, B), 'online')
+  m.setStatus(B, 'away')
+  assert.strictEqual(m.presence(g, B), 'away')
+  m.setStatus(B, 'invisible')
+  assert.strictEqual(m.presence(g, B), 'offline')
+  m.peerLeave('g1', B)
+  m.peerJoin('g1', B, { key: B })
+  assert.strictEqual(m.presence(g, B), 'online', 'a reconnect starts fresh')
+  assert.strictEqual(m.presence(g, C), 'offline')
+  m.idle = true
+  assert.strictEqual(m.myStatus(), 'away')
+  m.settings.status = 'invisible'
+  assert.strictEqual(m.presence(g, A), 'offline')
+
+  const h = 'e'.repeat(64)
+  m.applyOps('g1', [
+    raw('sound.add', B, { id: 's1', name: 'Airhorn', emoji: '📯', h, s: 5000, m: 'audio/mpeg', dur: 2000 }),
+    raw('sound.add', B, { id: 's2', name: 'Too big', h, s: 5 * 1024 * 1024, m: 'audio/mpeg', dur: 2000 }),
+    raw('sound.add', C, { id: 's3', name: 'Boing', h, s: 5000, m: 'audio/ogg', dur: 900 }),
+    raw('sound.delete', C, { id: 's1' }) // not theirs, not an admin
+  ])
+  assert.deepStrictEqual(m.soundsOf(g).map(s => s.id), ['s1', 's3'])
+  m.applyOps('g1', [raw('sound.delete', A, { id: 's3' })]) // the owner may
+  assert.deepStrictEqual(m.soundsOf(g).map(s => s.id), ['s1'])
+})

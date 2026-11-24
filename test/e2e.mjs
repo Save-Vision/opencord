@@ -4,7 +4,9 @@
 // roles, a voice call with mute/move, opt-in screen watching with viewers and zoom, friend links
 // with a private chat and call, and a kick. Since 0.5: channel folders, a chess game, @claude
 // against a stand-in for the Anthropic API, and checks that a muted mic sends nothing and that
-// forged voice messages can't open a call.
+// forged voice messages can't open a call. Since 0.6: search, profile cards, polls, status,
+// Claude's privacy (it only reads the asker) and replies to Claude, the soundboard, a poker hand,
+// a call over the fallback path, the update-required screen, and restoring a backup.
 // Screenshots land in test/screenshots/.
 // Run: npm run test:e2e
 import { _electron as electron } from 'playwright-core'
@@ -84,6 +86,8 @@ const step = (s) => console.log('▶', s)
 // A text channel's row also holds its unread badge, so find it by its name
 const openChannel = (page, name) => page.locator('.channel .ch-name').getByText(name, { exact: true }).click()
 const shot = (page, name) => page.screenshot({ path: path.join(shots, name + '.png') })
+// let pop-in animations finish so screenshots show the finished screen
+const settle = (page) => page.waitForTimeout(400)
 
 try {
   const alice = await launch('alice')
@@ -335,7 +339,7 @@ try {
   await openChannel(alice, 'general')
 
   step('chess: challenge, accept, play, agree a draw')
-  await alice.locator('.chat-header button[title="Play chess in this channel"]').click()
+  await alice.locator('.chat-header button[title="Play a game in this channel"]').click()
   await alice.locator('.modal select').first().selectOption({ label: 'Bob' })
   await shot(alice, '31-new-game')
   await alice.getByRole('button', { name: 'Send challenge' }).click()
@@ -398,10 +402,28 @@ try {
   await answer.locator('.asked-by', { hasText: 'Alice' }).waitFor()
   await bob.locator('.msg.draft').waitFor({ state: 'detached', timeout: 5000 })
   await alice.locator('.msg.bot:not(.draft)', { hasText: 'peer-to-peer' }).waitFor({ timeout: 5000 })
-  const asks = claudeLog.filter(r => r.path.startsWith('/v1/messages'))
+  let asks = claudeLog.filter(r => r.path.startsWith('/v1/messages'))
   if (asks.length !== 1) throw new Error(`expected 1 request to Claude, got ${asks.length}`)
-  if (!asks[0].body.includes('what does p2p mean') || !asks[0].body.includes('are you there')) throw new Error('the chat did not reach Claude')
+  if (!asks[0].body.includes('what does p2p mean')) throw new Error('the question did not reach Claude')
+  if (asks[0].body.includes('are you there') || asks[0].body.includes('works!')) throw new Error("Claude got Bob's messages although he didn't allow it")
   await shot(alice, '35-claude-answer')
+
+  step('@claude: replying to Claude asks again; friends can let Claude read along')
+  await bob.locator('.user-panel button[title="Settings"]').click()
+  await bob.locator('.settings nav button', { hasText: 'Privacy' }).click()
+  await bob.locator('.toggle-row', { hasText: 'Claude may read my messages' }).click()
+  await bob.waitForFunction(() => window.__od.model.me.claude === true, null, { timeout: 5000 })
+  await bob.keyboard.press('Escape')
+  await alice.waitForFunction(() => { const m = window.__od.model; const g = m.groupsList()[0]; return [...g.members.values()].some(x => x.claude) }, null, { timeout: 10000 })
+  await alice.locator('.msg.bot:not(.draft)', { hasText: 'peer-to-peer' }).hover()
+  await alice.locator('.msg.bot:not(.draft)', { hasText: 'peer-to-peer' }).locator('.msg-tools button[title="Reply"]').click()
+  await alice.locator('.claude-hint', { hasText: 'Replying to Claude asks it again' }).waitFor({ timeout: 5000 })
+  await alice.locator('.composer textarea').fill('and what is a DHT?')
+  await alice.keyboard.press('Enter')
+  await bob.locator('.msg.bot:not(.draft)').nth(1).waitFor({ timeout: 20000 })
+  asks = claudeLog.filter(r => r.path.startsWith('/v1/messages'))
+  if (asks.length !== 2) throw new Error(`expected a 2nd request to Claude, got ${asks.length}`)
+  if (!asks[1].body.includes('what is a DHT') || !asks[1].body.includes('are you there')) throw new Error('the reply, or the opted-in friend, did not reach Claude')
   // an admin turns @claude off for the whole group
   await alice.locator('.group-header').click()
   await alice.locator('.dropdown button', { hasText: 'Claude settings' }).click()
@@ -411,6 +433,105 @@ try {
   await alice.locator('.composer textarea').fill('@claude still there?')
   await alice.locator('.claude-hint.warn', { hasText: 'turned Claude off' }).waitFor({ timeout: 5000 })
   await alice.locator('.composer textarea').fill('')
+
+  step('search')
+  await bob.keyboard.press('Control+f')
+  await bob.locator('.search-panel input').fill('fully p2p')
+  await bob.locator('.search-hit', { hasText: 'Alice' }).first().waitFor({ timeout: 5000 })
+  await bob.locator('.search-panel input').fill('from:bob works')
+  await bob.locator('.search-hit', { hasText: 'no servers' }).waitFor({ timeout: 5000 })
+  if (await bob.locator('.search-hit').count() !== 1) throw new Error('search filters did not narrow it down')
+  const hitAvatar = await bob.locator('.search-hit .avatar').first().boundingBox()
+  if (hitAvatar.width > 30) throw new Error('search result avatars are ' + hitAvatar.width + ' px wide')
+  await settle(bob)
+  await shot(bob, '40-search')
+  await bob.locator('.search-hit').first().click()
+  await bob.locator('.msg.flash, .msg', { hasText: 'works!' }).first().waitFor({ timeout: 5000 })
+  await bob.locator('.search-panel button[title="Close (Esc)"]').click()
+
+  step('profile card from the chat')
+  await bob.locator('.msg .author.clickable', { hasText: 'Alice' }).first().click()
+  await bob.locator('.profile-menu .pc-name', { hasText: 'Alice' }).waitFor({ timeout: 5000 })
+  await bob.locator('.profile-menu .pc-status', { hasText: 'Online' }).waitFor()
+  await settle(bob)
+  await shot(bob, '41-profile-card')
+  await bob.keyboard.press('Escape')
+
+  step('poll')
+  await alice.locator('.composer textarea').fill('/poll Pizza tonight?')
+  await alice.keyboard.press('Enter')
+  await alice.locator('.modal input[placeholder="Answer 1"]').fill('Yes')
+  await alice.locator('.modal input[placeholder="Answer 2"]').fill('Only if it has pineapple')
+  await alice.getByRole('button', { name: 'Post poll' }).click()
+  await bob.locator('.poll-card', { hasText: 'Pizza tonight?' }).waitFor({ timeout: 10000 })
+  await bob.locator('.poll-opt', { hasText: 'pineapple' }).click()
+  await alice.locator('.poll-foot', { hasText: '1 vote' }).waitFor({ timeout: 10000 })
+  await alice.locator('.poll-opt', { hasText: 'Yes' }).click()
+  await bob.locator('.poll-foot', { hasText: '2 votes' }).waitFor({ timeout: 10000 })
+  await shot(bob, '42-poll')
+
+  step('status: away and appear offline')
+  const statusBtn = (label) => alice.locator('.status-menu button', { has: alice.locator('b', { hasText: new RegExp('^' + label + '$') }) })
+  await alice.locator('.up-me').click()
+  await statusBtn('Away').click()
+  await bob.locator('.member', { hasText: 'Alice' }).locator('.presence.away').waitFor({ timeout: 10000 })
+  await alice.locator('.up-me').click()
+  await statusBtn('Appear offline').click()
+  await bob.locator('.member.off', { hasText: 'Alice' }).waitFor({ timeout: 10000 })
+  await shot(bob, '43-status')
+  await alice.locator('.up-me').click()
+  await statusBtn('Online').click()
+  await bob.locator('.member:not(.off)', { hasText: 'Alice' }).locator('.presence.online').waitFor({ timeout: 10000 })
+
+  step('poker: a hand dealt by mental poker')
+  await alice.locator('.composer textarea').fill('/poker')
+  await alice.keyboard.press('Enter')
+  await alice.locator('.modal .seg-pick button.active', { hasText: 'Poker' }).waitFor()
+  await alice.getByRole('button', { name: 'Open table' }).click()
+  await alice.locator('.pk-felt').waitFor({ timeout: 5000 })
+  await bob.locator('.poker-card').getByRole('button', { name: 'Take a seat' }).click({ timeout: 15000 })
+  await bob.locator('.pk-felt').waitFor({ timeout: 5000 })
+  await alice.getByRole('button', { name: 'Start dealing' }).click({ timeout: 10000 })
+  for (const page of [alice, bob]) await page.waitForFunction(() => document.querySelectorAll('.pk-hole.mine .pcard:not(.back)').length === 2, null, { timeout: 30000 })
+  const holes = await Promise.all([alice, bob].map(p => p.evaluate(() => [...document.querySelectorAll('.pk-hole.mine .pcard')].map(c => c.textContent).join(' '))))
+  console.log('   alice holds', holes[0], '· bob holds', holes[1])
+  const peek = await bob.evaluate(() => { const m = window.__od.model; const g = m.groupsList()[0]; const gm = [...g.games.values()].find(x => x.info?.kind === 'poker'); const st = m.gameState(g, gm.id); const ai = st.hand.players.indexOf(st.by); return [2 * ai, 2 * ai + 1].map(j => gm.cards.get(st.hand.h + ':' + j) ?? gm.mine.get(st.hand.h + ':' + j) ?? null) })
+  if (peek.some(c => c != null)) throw new Error("bob's app could open alice's cards")
+  await shot(alice, '44-poker')
+  // whoever acts first calls, the other checks, then everyone checks to the showdown
+  const handOver = () => alice.evaluate(() => /\bwins?\b|cancelled/.test(document.querySelector('.pk-status')?.textContent || ''))
+  for (let i = 0; i < 20; i++) {
+    let turn = -1
+    for (let w = 0; w < 150 && turn < 0; w++) {
+      if (await handOver()) break
+      for (const [k, p] of [alice, bob].entries()) if (await p.locator('.pk-actions').count()) { turn = k; break }
+      if (turn < 0) await alice.waitForTimeout(200)
+    }
+    if (turn < 0) break
+    const page = [alice, bob][turn]
+    const label = (await page.locator('.pk-actions .btn').nth(1).textContent()).trim()
+    if (!/Check|Call/.test(label)) throw new Error('unexpected action ' + label)
+    await page.locator('.pk-actions .btn').nth(1).click()
+    await page.locator('.pk-actions').waitFor({ state: 'detached', timeout: 10000 })
+  }
+  await alice.locator('.pk-status', { hasText: /win/ }).waitFor({ timeout: 20000 })
+  await bob.locator('.pk-status', { hasText: /win/ }).waitFor({ timeout: 5000 })
+  console.log('   result:', (await alice.locator('.pk-status').textContent()).trim())
+  await shot(bob, '45-poker-showdown')
+  await alice.getByRole('button', { name: 'Pause after this hand' }).click()
+  await openChannel(alice, 'general')
+  await openChannel(bob, 'general')
+
+  step('update required screen')
+  await alice.evaluate(() => { const m = window.__od.model; const g = m.groupsList()[0]; m.compat = [{ key: [...g.online.keys()][0], version: '9.9.9', reason: 'update-me', groups: [g.id] }]; m.emit() })
+  await alice.locator('.update-required h1', { hasText: 'Time to update' }).waitFor({ timeout: 5000 })
+  await alice.locator('.update-required', { hasText: 'Bob' }).waitFor()
+  await settle(alice)
+  await shot(alice, '46-update-required')
+  await alice.evaluate(() => { const m = window.__od.model; m.compat = [{ key: [...m.groupsList()[0].online.keys()][0], version: '0.4.0', reason: 'update-them', groups: [m.groupsList()[0].id] }]; m.emit() })
+  await alice.locator('.update-required').waitFor({ state: 'detached', timeout: 5000 })
+  await alice.locator('.banner.warn', { hasText: "can't sync with yours" }).waitFor({ timeout: 5000 })
+  await alice.evaluate(() => { window.__od.model.compat = []; window.__od.model.emit() })
 
   step('owner makes bob an admin')
   await alice.locator('.member', { hasText: 'Bob' }).click({ button: 'right' })
@@ -436,6 +557,32 @@ try {
   console.log('   alice sees bob:', (await alice.locator('.tile-conn').textContent()).trim())
   console.log('   bob sees alice:', (await bob.locator('.tile-conn').textContent()).trim())
   console.log('   AI noise suppression active:', await alice.evaluate(() => window.__od.voice.denoised), '/', await bob.evaluate(() => window.__od.voice.denoised))
+
+  step('soundboard')
+  await alice.evaluate(async () => {
+    // a 0.3 s beep as a WAV file
+    const rate = 8000
+    const n = rate * 0.3
+    const buf = new ArrayBuffer(44 + n * 2)
+    const v = new DataView(buf)
+    const w = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)) }
+    w(0, 'RIFF'); v.setUint32(4, 36 + n * 2, true); w(8, 'WAVEfmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true)
+    v.setUint32(24, rate, true); v.setUint32(28, rate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true); w(36, 'data'); v.setUint32(40, n * 2, true)
+    for (let i = 0; i < n; i++) v.setInt16(44 + i * 2, Math.sin(i / rate * 2 * Math.PI * 660) * 8000, true)
+    const a = await window.od.importData('beep.wav', 'audio/wav', new Uint8Array(buf))
+    const g = window.__od.model.groupsList()[0]
+    const op = await window.od.append(g.id, 'sound.add', { id: 'beep1', name: 'Beep', emoji: '🔔', h: a.h, s: a.s, m: a.m, dur: 300 })
+    window.__od.model.applyOps(g.id, [op])
+  })
+  await bob.locator('.voice-panel button[title="Soundboard"]').click()
+  await bob.locator('.sb-sound', { hasText: 'Beep' }).waitFor({ timeout: 10000 })
+  await settle(bob)
+  await shot(bob, '47-soundboard')
+  await bob.locator('.sb-sound', { hasText: 'Beep' }).click()
+  await alice.waitForFunction(() => window.__od.model.lastSound?.id === 'beep1' && window.__od.model.lastSound.key !== window.__od.model.me.key, null, { timeout: 10000 })
+  console.log('   alice heard bob play a sound')
+  await bob.keyboard.press('Escape')
+  await bob.locator('.voice-panel button[title="Soundboard"]').click()
 
   step('muted: not a single audio packet leaves the PC')
   const sendsAudio = (page) => page.evaluate(() => [...window.__od.voice.calls.values()].some(c => c.pc.getSenders().some(s => s.track?.kind === 'audio')))
@@ -601,14 +748,17 @@ try {
   await bob.locator('.chat-header button[title="Back to the chat"]').click()
   await alice.locator('.composer textarea').waitFor()
 
-  step('private call')
+  step('private call, over the fallback path (as if no direct route worked)')
+  for (const p of [alice, bob]) await p.evaluate(() => { window.__od.model.forceRelay = true })
   await alice.locator('.chat-header button[title="Start a call"]').click()
   await bob.locator('.call-banner').waitFor({ timeout: 10000 })
   await shot(bob, '22-incoming-call')
   await bob.locator('.call-banner .round-btn[title="Accept"]').click()
   await alice.locator('.tile-conn.good').waitFor({ timeout: 45000 })
   await bob.locator('.tile-conn.good').waitFor({ timeout: 45000 })
+  await alice.waitForFunction(() => [...window.__od.voice.calls.values()].some(c => c.stats?.path === 'relay'), null, { timeout: 15000 })
   console.log('   private call connected:', (await alice.locator('.tile-conn').textContent()).trim())
+  for (const p of [alice, bob]) await p.evaluate(() => { window.__od.model.forceRelay = false })
   await shot(alice, '23-private-call')
   await alice.locator('.call-controls .hangup').click()
   await bob.evaluate(() => window.__od.voice.leave())
@@ -623,6 +773,46 @@ try {
   await alice.waitForFunction(() => ![...document.querySelectorAll('.member b')].some(b => b.textContent.includes('Bob')), null, { timeout: 10000 })
   await shot(bob, '24-kicked')
   await bob.waitForFunction(() => !document.querySelector('.toast'), null, { timeout: 9000 })
+
+  step('backup, then restore it on a "new PC"')
+  const backupFile = path.join(tmp, 'alice.odbackup')
+  await alice.locator('.user-panel button[title="Settings"]').click()
+  await alice.locator('.settings nav button', { hasText: 'Account' }).click()
+  await alice.locator('.settings-body', { hasText: "You haven't made a backup yet" }).waitFor()
+  await alice.keyboard.press('Escape')
+  await alice.evaluate((file) => window.__od.model.openModal('backup', { testPath: file }), backupFile)
+  await alice.locator('.modal input[type="password"]').first().fill('pizza with pineapple')
+  await alice.locator('.modal input[type="password"]').nth(1).fill('pizza with pineapple')
+  await alice.getByRole('button', { name: 'Save backup…' }).click()
+  await alice.locator('.toast', { hasText: 'Backup saved' }).waitFor({ timeout: 10000 })
+  if (fs.readFileSync(backupFile, 'utf8').includes('Alice')) console.log('   (the account name is readable in the backup header, by design)')
+  const aliceKeyBefore = await alice.evaluate(() => window.__od.model.me.key)
+  await apps[0].close()
+  const fresh = await launch('alice-newpc')
+  await fresh.getByPlaceholder('What your friends call you').waitFor()
+  await fresh.evaluate((file) => window.__od.model.openModal('restore', { testPath: file }), backupFile)
+  await fresh.getByRole('button', { name: 'Choose backup file…' }).click()
+  await fresh.locator('.backup-file b', { hasText: 'Alice' }).waitFor({ timeout: 5000 })
+  await fresh.locator('.modal input[type="password"]').fill('wrong password')
+  await fresh.getByRole('button', { name: 'Restore and restart' }).click()
+  await fresh.locator('.modal .error-text', { hasText: 'Wrong password' }).waitFor({ timeout: 10000 })
+  await fresh.locator('.modal input[type="password"]').fill('pizza with pineapple')
+  const closed = apps[apps.length - 1].waitForEvent('close', { timeout: 20000 })
+  await fresh.getByRole('button', { name: 'Restore and restart' }).click()
+  await closed
+  const restored = await launch('alice-newpc')
+  await restored.locator('.user-panel b', { hasText: 'Alice' }).waitFor({ timeout: 15000 })
+  if (await restored.evaluate(() => window.__od.model.me.key) !== aliceKeyBefore) throw new Error('restored a different identity')
+  await restored.locator('.rail-btn.home').click()
+  await restored.locator('.dm-item', { hasText: 'Bob' }).click({ timeout: 15000 })
+  await restored.locator('.msg .text', { hasText: 'just between us' }).waitFor({ timeout: 45000 })
+  await restored.locator('.composer textarea').waitFor({ timeout: 15000 })
+  await restored.locator('.composer textarea').fill('I am back on a new PC')
+  await restored.keyboard.press('Enter')
+  await bob.locator('.rail-btn.home').click()
+  await bob.locator('.dm-item', { hasText: 'Alice' }).click()
+  await bob.locator('.msg .text', { hasText: 'I am back on a new PC' }).waitFor({ timeout: 15000 })
+  await shot(restored, '48-restored')
 
   console.log('\n✅ e2e passed — screenshots in test/screenshots/')
 } catch (err) {
@@ -653,7 +843,7 @@ try {
     } catch {}
   }
 } finally {
-  for (const app of apps) await app.close().catch(() => {})
+  for (const app of apps) await Promise.race([app.close().catch(() => {}), new Promise(resolve => setTimeout(resolve, 5000))])
   await testnet.destroy()
   claudeMock.close()
   fs.rmSync(tmp, { recursive: true, force: true })

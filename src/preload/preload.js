@@ -3,7 +3,7 @@
 const { contextBridge, ipcRenderer, webUtils } = require('electron')
 
 const EVENTS = new Set(['ops', 'peer-join', 'peer-leave', 'peer-update', 'eph', 'blob-progress', 'focus-change', 'hotkey', 'update', 'membership', 'friends',
-  'group-added', 'group-removed', 'joins', 'notice', 'open-link', 'claude-update'])
+  'group-added', 'group-removed', 'joins', 'notice', 'open-link', 'claude-update', 'compat'])
 const invoke = (ch, ...args) => ipcRenderer.invoke(ch, ...args)
 
 contextBridge.exposeInMainWorld('od', {
@@ -43,6 +43,21 @@ contextBridge.exposeInMainWorld('od', {
   claudeClearKey: () => invoke('claude:clear-key'),
   claudeAsk: (id, req) => invoke('claude:ask', id, req),
   claudeCancel: (id) => invoke('claude:cancel', id),
+
+  backupExport: (password, testPath) => invoke('backup:export', password, testPath),
+  backupPick: (testPath) => invoke('backup:pick', testPath),
+  backupRestore: (file, password) => invoke('backup:restore', file, password),
+
+  openTunnel: (key) => invoke('tunnel:open', key),
+  closeTunnel: (key) => invoke('tunnel:close', key),
+
+  pokerShuffle: (id, h, deck) => invoke('poker:shuffle', id, h, deck),
+  pokerLock: (id, h, deck) => invoke('poker:lock', id, h, deck),
+  pokerReveal: (id, h, idx) => invoke('poker:reveal', id, h, idx),
+  pokerOpen: (locked, keys) => invoke('poker:open', locked, keys),
+  pokerOpenMine: (id, h, j, locked, others) => invoke('poker:open-mine', id, h, j, locked, others),
+
+  idleSeconds: () => invoke('idle:get'),
 
   append: (gid, kind, data) => invoke('op:append', gid, kind, data),
   sendEph: (gid, to, data) => ipcRenderer.send('eph', gid, to, data),

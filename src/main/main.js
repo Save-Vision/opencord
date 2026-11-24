@@ -1,7 +1,7 @@
 'use strict'
 const {
   app, BrowserWindow, ipcMain, protocol, session, desktopCapturer, shell, dialog,
-  Tray, Menu, nativeImage, clipboard, globalShortcut, safeStorage
+  Tray, Menu, nativeImage, clipboard, globalShortcut, safeStorage, powerMonitor
 } = require('electron')
 const path = require('path')
 const fs = require('fs')
@@ -12,6 +12,7 @@ const { Updater } = require('./updater')
 const datadir = require('./datadir')
 const { linkPreview } = require('./linkpreview')
 const { Claude } = require('./claude')
+const poker = require('./poker')
 const c = require('./crypto')
 
 // --profile=name runs an isolated instance (own identity + data). Handy for testing
@@ -67,6 +68,10 @@ let updater = null
 let claude = null
 let quitting = false
 let pendingScreen = null
+let accountNote = null // { kind: 'locked', folder }: the old account couldn't be unlocked on this PC
+// Tests run with OD_DATA_DIR; some test-only switches below only work then
+const TESTING = !!process.env.OD_DATA_DIR
+const testInt = (name) => TESTING && /^\d+$/.test(process.env[name] || '') ? Number(process.env[name]) : undefined
 
 // opendiscord:// links (one-time invites and friend links). Clicking one starts the app, or
 // hands the link to the running one (second-instance on Windows/Linux, open-url on macOS).
@@ -116,13 +121,31 @@ function send (channel, ...args) {
   if (win && !win.isDestroyed()) win.webContents.send(channel, ...args)
 }
 
+// The identity's secret is kept encrypted with the OS keychain (DPAPI on Windows). If this PC
+// can't decrypt it (the data folder came from another PC or Windows user), the old account is
+// set aside, not deleted, and the app starts fresh with a way to restore a backup.
+function openStore (dir) {
+  const seal = safeStorage.isEncryptionAvailable() ? (s) => safeStorage.encryptString(s).toString('base64') : null
+  const unseal = (b64) => safeStorage.decryptString(Buffer.from(b64, 'base64'))
+  try {
+    return new Store(dir).load({ seal, unseal })
+  } catch (err) {
+    if (err.code !== 'IDENTITY_LOCKED') throw err
+    accountNote = { kind: 'locked', folder: Store.setAside(dir, 'locked') }
+    return new Store(dir).load({ seal, unseal })
+  }
+}
+
 async function boot () {
   app.setAppUserModelId('app.opendiscord' + (profile ? '.' + profile : ''))
-  store = new Store(await openDataDir()).load()
+  store = openStore(await openDataDir())
   claude = new Claude({ dir: store.dir, safeStorage, store })
   net = new Network(store, {
     bootstrap: process.env.OD_BOOTSTRAP ? process.env.OD_BOOTSTRAP.split(',') : undefined,
-    appVersion: app.getVersion()
+    appVersion: app.getVersion(),
+    // tests play a newer app this way
+    proto: testInt('OD_TEST_PROTO'),
+    minProto: testInt('OD_TEST_MIN_PROTO')
   })
   updater = new Updater({ isEnabled: () => store.settings.autoUpdate !== false })
   updater.on('state', (st) => send('update', st))
@@ -379,9 +402,69 @@ function registerIpc () {
       peers: net.onlinePeers(),
       friends: store.friendsInfo(),
       joins: store.joinsInfo(),
+      compat: net.compatInfo(),
+      accountNote,
+      testing: TESTING,
+      forceRelay: TESTING && !!process.env.OD_TEST_FORCE_RELAY,
       link
     }
   })
+
+  // ---- backup & restore (Settings → Account) ----
+  handle('backup:export', async (password, testPath) => {
+    const text = store.exportBackup(String(password || ''))
+    let file = TESTING && typeof testPath === 'string' ? testPath : null
+    if (!file) {
+      const stamp = new Date().toISOString().slice(0, 10)
+      const safeName = (store.identity.name || 'account').replace(/[^\p{L}\p{N} _-]/gu, '').trim() || 'account'
+      const r = await dialog.showSaveDialog(win, {
+        title: 'Save your OpenDiscord backup',
+        defaultPath: path.join(app.getPath('documents'), `OpenDiscord backup ${safeName} ${stamp}.odbackup`),
+        filters: [{ name: 'OpenDiscord backup', extensions: ['odbackup'] }]
+      })
+      if (r.canceled || !r.filePath) return null
+      file = r.filePath
+    }
+    await fs.promises.writeFile(file, text, { mode: 0o600 })
+    store.setSettings({ lastBackup: Date.now() })
+    return file
+  })
+  handle('backup:pick', async (testPath) => {
+    let file = TESTING && typeof testPath === 'string' ? testPath : null
+    if (!file) {
+      const r = await dialog.showOpenDialog(win, { title: 'Choose your OpenDiscord backup', properties: ['openFile'], filters: [{ name: 'OpenDiscord backup', extensions: ['odbackup', 'json'] }] })
+      if (r.canceled || !r.filePaths[0]) return null
+      file = r.filePaths[0]
+    }
+    let head = null
+    try { head = JSON.parse(await fs.promises.readFile(file, 'utf8')) } catch {}
+    if (!head || head.kind !== 'opendiscord-backup') throw new Error("That isn't an OpenDiscord backup file")
+    return { path: file, name: String(head.name || ''), key: String(head.key || ''), created: Number(head.created) || null }
+  })
+  handle('backup:restore', async (file, password) => {
+    const b = Store.openBackup(await fs.promises.readFile(String(file), 'utf8'), password)
+    await Promise.race([net.stop(), new Promise(resolve => setTimeout(resolve, 2500))])
+    store.restoreBackup(b)
+    // Tests can't follow a relaunch: they start the app again themselves
+    setTimeout(() => { if (TESTING) { quitting = true; app.exit(0) } else relaunch() }, 200)
+    return true
+  })
+
+  // ---- call fallback over the chat connection (network.js) ----
+  handle('tunnel:open', (key) => net.openTunnel(String(key)))
+  handle('tunnel:close', (key) => { net.closeTunnel(String(key)); return true })
+
+  // ---- poker: card crypto with keys derived from this identity (poker.js) ----
+  const tbl = (id) => { if (!/^[\w-]{1,32}$/.test(String(id))) throw new Error('Bad table'); return String(id) }
+  const hnum = (h) => { if (!Number.isInteger(h) || h < 1) throw new Error('Bad hand'); return h }
+  handle('poker:shuffle', (id, h, deck) => poker.shuffle(store.seed, tbl(id), hnum(h), deck || null))
+  handle('poker:lock', (id, h, deck) => poker.lock(store.seed, tbl(id), hnum(h), deck))
+  handle('poker:reveal', (id, h, idx) => poker.reveal(store.seed, tbl(id), hnum(h), Array.isArray(idx) ? idx : []))
+  handle('poker:open', (locked, keys) => poker.open(String(locked), Array.isArray(keys) ? keys : []))
+  handle('poker:open-mine', (id, h, j, locked, others) => poker.openMine(store.seed, tbl(id), hnum(h), j, String(locked), Array.isArray(others) ? others : []))
+
+  // seconds since the last keyboard/mouse input anywhere (for "away")
+  handle('idle:get', () => powerMonitor.getSystemIdleTime())
 
   handle('friends:info', () => store.friendsInfo())
   handle('friend:add', (code, name) => {
@@ -606,6 +689,8 @@ function registerIpc () {
 }
 
 function wireNetwork () {
+  net.on('compat', (list) => send('compat', list))
+  net.on('restored', (gid) => sendMembership(gid))
   net.on('peer-join', (g, key, info) => send('peer-join', g, key, info))
   net.on('peer-leave', (g, key) => send('peer-leave', g, key))
   net.on('peer-update', (info) => send('peer-update', info))

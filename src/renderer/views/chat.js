@@ -7,9 +7,12 @@ import { renderMarkdown, renderMarkdownDoc, isEmojiOnly, previewableUrls } from 
 import { highlight, extOf, langFor, langLabel } from '../lib/highlight.js'
 import { DM_CALL } from '../lib/model.js'
 import { Icon } from '../lib/icons.js'
-import { askClaude, mentionsClaude, claudeBlocked, stopClaude, MODEL_LABEL } from '../lib/claude.js'
+import { askClaude, mentionsClaude, claudeBlocked, stopClaude, MODEL_LABEL, isClaudeAnswer } from '../lib/claude.js'
 import { EmojiPanel, EmojiSuggest, loadEmoji, searchEmoji, rememberEmoji } from './emoji.js'
 import { GameCard } from './games.js'
+import { PollCard } from './polls.js'
+import { openMemberMenu } from './members.js'
+import { OutdatedBanner } from './compat.js'
 
 const drafts = new Map()
 const PAGE = 150
@@ -151,7 +154,7 @@ export function ChatView ({ g, ch }) {
       onDrop=${onDrop}>
       <header class="chat-header">
         ${dm
-          ? html`<${Avatar} name=${friendName} color=${model.memberColor(g, dm)} src=${model.memberAvatar(g, dm)} size=${26} dot=${g.online.has(dm) ? 'online' : 'offline'} /><h2>${friendName}</h2>`
+          ? html`<${Avatar} name=${friendName} color=${model.memberColor(g, dm)} src=${model.memberAvatar(g, dm)} size=${26} dot=${model.presence(g, dm)} /><h2>${friendName}</h2>`
           : html`<${Icon} name="hash" size=${22} class="dim" /><h2>${ch.name}</h2>`}
         <span class="header-note"><${Icon} name="lock" size=${13} /> ${dm ? 'Private: only the two of you have the key' : "Stored only on your friends' devices"}</span>
         <div class="spacer" />
@@ -160,8 +163,10 @@ export function ChatView ({ g, ch }) {
         ${dm && html`<button class="icon-btn" title="Shared tasks" onClick=${() => model.openPlanner(g.id, 'tasks')}><${Icon} name="tasks" /></button>`}
         ${dm
           ? html`<button class="icon-btn" title="Games" onClick=${() => model.openGames(g.id)}><${Icon} name="chess" /></button>`
-          : !g.kickedMe && html`<button class="icon-btn" title="Play chess in this channel" onClick=${() => model.openModal('newGame', { gid: g.id, ch: ch.id })}><${Icon} name="chess" /></button>`}
+          : !g.kickedMe && html`<button class="icon-btn" title="Play a game in this channel" onClick=${() => model.openModal('newGame', { gid: g.id, ch: ch.id })}><${Icon} name="chess" /></button>`}
+        ${!g.kickedMe && !g.restoring && html`<button class="icon-btn" title="Create a poll" onClick=${() => model.openModal('poll', { gid: g.id, ch: ch.id })}><${Icon} name="poll" /></button>`}
         <${PinsButton} g=${g} ch=${ch} />
+        <button class="icon-btn ${model.ui.search?.gid === g.id ? 'on' : ''}" title="Search (Ctrl+F)" onClick=${() => model.openSearch('')}><${Icon} name="search" /></button>
         ${!dm && model.canInvite(g) && html`<button class="icon-btn" title="Invite friends" onClick=${() => model.openModal('invite', { gid: g.id })}><${Icon} name="userPlus" /></button>`}
       </header>
       ${g.kickedMe && html`
@@ -169,6 +174,7 @@ export function ChatView ({ g, ch }) {
           <span>You were removed from this group. You won't receive new messages.</span>
           <button class="btn sm" onClick=${() => leaveGroupFlow(g)}>Leave group</button>
         </div>`}
+      <${OutdatedBanner} g=${g} />
       ${pending && html`
         <div class="banner info">
           <${Icon} name="userPlus" size=${16} />
@@ -401,7 +407,7 @@ function Message ({ g, m, grouped, ctx, onMediaLoad, inThread = false }) {
   const pin = () => act(() => append(g.id, 'msg.pin', { id: m.id, on: !pinned }))
 
   return html`
-    <div id=${'msg-' + m.id} class="msg ${grouped ? 'grouped' : ''} ${mention ? 'mention' : ''} ${editing ? 'editing' : ''} ${pinned ? 'pinned' : ''} ${bot ? 'bot' : ''} ${m.game ? 'has-game' : ''}">
+    <div id=${'msg-' + m.id} class="msg ${grouped ? 'grouped' : ''} ${mention ? 'mention' : ''} ${editing ? 'editing' : ''} ${pinned ? 'pinned' : ''} ${bot ? 'bot' : ''} ${m.game ? 'has-game' : ''} ${m.poll ? 'has-poll' : ''}">
       ${m.also && !inThread && html`
         <div class="reply-ref thread-ref" onClick=${() => model.openThread(g.id, m.th)}>
           <${Icon} name="thread" size=${13} />
@@ -412,24 +418,28 @@ function Message ({ g, m, grouped, ctx, onMediaLoad, inThread = false }) {
         <div class="reply-ref" onClick=${() => jumpToMessage(m.re)}>
           <span class="reply-line" />
           ${parent && !parent.deleted
-            ? html`<b class=${parent.bot ? 'claude-name' : ''} style=${parent.bot ? null : { color: model.memberColor(g, parent.a) }}>${parent.bot ? 'Claude' : model.memberName(g, parent.a)}</b><span class="reply-snippet">${parent.game ? '♟ chess game' : snippet(parent.text) || '📎 attachment'}</span>`
+            ? html`<b class=${parent.bot ? 'claude-name' : ''} style=${parent.bot ? null : { color: model.memberColor(g, parent.a) }}>${parent.bot ? 'Claude' : model.memberName(g, parent.a)}</b><span class="reply-snippet">${parent.game ? (g.games.get(parent.id)?.info?.kind === 'poker' ? '🃏 poker table' : '♟ chess game') : parent.poll ? '📊 ' + parent.poll.q : snippet(parent.text) || '📎 attachment'}</span>`
             : html`<i>Original message was deleted</i>`}
         </div>`}
       ${grouped
         ? html`<span class="gutter-time">${fmtTime(m.t)}</span>`
-        : html`<div class="msg-avatar">${bot ? html`<${ClaudeAvatar} />` : html`<${Avatar} name=${name} color=${color} src=${model.memberAvatar(g, m.a)} />`}</div>`}
+        : html`<div class="msg-avatar">${bot ? html`<${ClaudeAvatar} />` : html`<button class="avatar-btn" title=${'Profile of ' + name} onClick=${(e) => openMemberMenu(e, g, m.a)} onContextMenu=${(e) => openMemberMenu(e, g, m.a)}><${Avatar} name=${name} color=${color} src=${model.memberAvatar(g, m.a)} /></button>`}</div>`}
       <div class="msg-body">
         ${!grouped && html`
           <div class="msg-head">
-            <span class="author ${bot ? 'claude-name' : ''}" style=${color ? { color } : null}>${name}</span>
-            ${bot && html`<span class="bot-tag">AI</span><small class="asked-by" title="Asked with their own API key">for ${model.memberName(g, m.a)} · ${MODEL_LABEL[m.bot.model] || m.bot.model || 'Claude'}</small>`}
+            ${bot
+              ? html`<span class="author claude-name">${name}</span>`
+              : html`<span class="author clickable" style=${color ? { color } : null} onClick=${(e) => openMemberMenu(e, g, m.a)} onContextMenu=${(e) => openMemberMenu(e, g, m.a)}>${name}</span>`}
+            ${bot && html`<span class="bot-tag">AI</span><small class="asked-by" title="Asked with their own API key">for <a onClick=${(e) => openMemberMenu(e, g, m.a)}>${model.memberName(g, m.a)}</a> · ${MODEL_LABEL[m.bot.model] || m.bot.model || 'Claude'}</small>`}
             <time title=${new Date(m.t).toLocaleString()}>${fmtStamp(m.t)}</time>${pinned && html`<span class="pin-mark" title="Pinned"><${Icon} name="pin" size=${12} /></span>`}
           </div>`}
         ${editing
           ? html`<${EditBox} g=${g} m=${m} />`
           : m.game
             ? html`<${GameCard} g=${g} m=${m} />`
-            : m.text && html`<div class="text ${isEmojiOnly(m.text) ? 'jumbo' : ''}">${m._md}${m.edited ? html`<span class="edited" title=${'Edited ' + new Date(m.edited).toLocaleString()}> (edited)</span>` : ''}${grouped && pinned ? html`<span class="pin-mark" title="Pinned"><${Icon} name="pin" size=${12} /></span>` : ''}</div>`}
+            : m.poll
+              ? html`<${PollCard} g=${g} m=${m} />`
+              : m.text && html`<div class="text ${isEmojiOnly(m.text) ? 'jumbo' : ''}">${m._md}${m.edited ? html`<span class="edited" title=${'Edited ' + new Date(m.edited).toLocaleString()}> (edited)</span>` : ''}${grouped && pinned ? html`<span class="pin-mark" title="Pinned"><${Icon} name="pin" size=${12} /></span>` : ''}</div>`}
         ${m.att.length > 0 && html`<div class="attachments">${m.att.map(a => html`<${Attachment} key=${a.h} g=${g} a=${a} onLoad=${onMediaLoad} />`)}</div>`}
         ${embeds.length > 0 && html`<div class="embeds">${embeds.map(e => html`<${Embed} key=${e.url} e=${e} onLoad=${onMediaLoad} />`)}</div>`}
         ${m.reactions.size > 0 && html`
@@ -448,7 +458,7 @@ function Message ({ g, m, grouped, ctx, onMediaLoad, inThread = false }) {
           ${!inThread && html`<button title="Reply" onClick=${() => { model.ui.replyTo = m.id; model.emit(); document.querySelector('.chat .composer textarea')?.focus() }}><${Icon} name="reply" size=${18} /></button>`}
           ${!inThread && !m.th && html`<button title="Reply in thread" class="thread-btn" onClick=${() => model.openThread(g.id, m.id)}><${Icon} name="thread" size=${18} /></button>`}
           <button title=${pinned ? 'Unpin' : 'Pin message'} class=${pinned ? 'on' : ''} onClick=${pin}><${Icon} name="pin" size=${18} /></button>
-          ${mine && !bot && !m.game && html`<button title="Edit" onClick=${() => { model.ui.editing = m.id; model.emit() }}><${Icon} name="edit" size=${18} /></button>`}
+          ${mine && !bot && !m.game && !m.poll && html`<button title="Edit" onClick=${() => { model.ui.editing = m.id; model.emit() }}><${Icon} name="edit" size=${18} /></button>`}
           ${mine && html`<button title="Delete (shift-click to skip confirmation)" class="danger" onClick=${del}><${Icon} name="trash" size=${18} /></button>`}
         </div>`}
       ${picker && html`<${EmojiPanel} class="for-message" onPick=${react} onClose=${() => setPicker(false)} />`}
@@ -635,15 +645,15 @@ function MentionSuggest ({ g, items, index, onPick }) {
     </div>`
 }
 
-// Shown above the composer while the message mentions @claude
-function ClaudeHint ({ g }) {
+// Shown above the composer while the message mentions @claude (or replies to Claude)
+function ClaudeHint ({ g, again = false }) {
   const why = claudeBlocked(g)
   const model_ = MODEL_LABEL[model.settings.claude?.model] || 'Claude'
   if (why === 'nokey') {
     return html`<div class="claude-hint warn"><${Icon} name="sparkle" size=${14} /><span>Claude answers with your own Anthropic API key, and you haven't added one.</span><a onClick=${() => model.openModal('settings', { tab: 'claude' })}>Add a key</a></div>`
   }
   if (why === 'off') return html`<div class="claude-hint warn"><${Icon} name="sparkle" size=${14} /><span>An admin turned Claude off in this group.</span></div>`
-  return html`<div class="claude-hint"><${Icon} name="sparkle" size=${14} /><span>Claude (${model_}) will read the recent messages here and answer, using your API key.</span></div>`
+  return html`<div class="claude-hint"><${Icon} name="sparkle" size=${14} /><span>${again ? 'Replying to Claude asks it again: ' : ''}Claude (${model_}) reads your recent messages here and its answers to you (not other people's, unless they allowed it in Settings › Privacy), and answers with your API key.</span></div>`
 }
 
 function Composer ({ g, ch, handle, thread = null }) {
@@ -676,6 +686,7 @@ function Composer ({ g, ch, handle, thread = null }) {
   useEffect(() => { drafts.set(key, text) }, [text])
 
   if (g.kickedMe) return html`<div class="composer-wrap"><div class="composer disabled">You can't send messages here because you were removed from this group.</div><div class="typing" /></div>`
+  if (g.restoring) return html`<div class="composer-wrap"><div class="composer disabled"><span class="spinner" /> Getting your messages back from your backup… You can write here once someone from this chat has been online.</div><div class="typing" /></div>`
 
   const placeholder = thread ? 'Reply in thread…' : g.dm ? 'Message @' + model.groupName(g) : 'Message #' + ch.name
 
@@ -687,6 +698,22 @@ function Composer ({ g, ch, handle, thread = null }) {
       model.openModal('newGame', { gid: g.id, ch: ch.id })
       return
     }
+    if (/^\/poker\b/i.test(t) && !files.length) {
+      setText('')
+      model.openModal('newGame', { gid: g.id, ch: ch.id, kind: 'poker' })
+      return
+    }
+    if (/^\/poll\b/i.test(t) && !files.length && !thread) {
+      setText('')
+      model.openModal('poll', { gid: g.id, ch: ch.id, q: t.replace(/^\/poll\s*/i, '') })
+      return
+    }
+    if (/^\/search\b/i.test(t) && !files.length) {
+      setText('')
+      model.openSearch(t.replace(/^\/search\s*/i, ''))
+      return
+    }
+    const askAgain = !!reply && isClaudeAnswer(reply) && !claudeBlocked(g)
     const data = { id: rid(), ch: ch.id, text: t }
     if (files.length) data.att = files.map(({ h, s, n, m, w, hh }) => ({ h, s, n, m, w, hh }))
     if (reply) data.re = reply.id
@@ -704,7 +731,7 @@ function Composer ({ g, ch, handle, thread = null }) {
     model.emit()
     requestAnimationFrame(() => ta.current && autosize(ta.current))
     if (t) attachPreviews(g.id, data.id, t)
-    if (mentionsClaude(t)) {
+    if (t && (mentionsClaude(t) || askAgain)) {
       const m = g.msgById.get(data.id)
       if (m) askClaude(g, m)
     }
@@ -810,7 +837,7 @@ function Composer ({ g, ch, handle, thread = null }) {
       ${sugg.mode === 'mention'
         ? html`<${MentionSuggest} g=${g} items=${sugg.items} index=${sugg.index} onPick=${applySuggest} />`
         : html`<${EmojiSuggest} items=${sugg.items} index=${sugg.index} onPick=${applySuggest} />`}
-      ${mentionsClaude(text) && html`<${ClaudeHint} g=${g} />`}
+      ${mentionsClaude(text) ? html`<${ClaudeHint} g=${g} />` : isClaudeAnswer(reply) && !claudeBlocked(g) && html`<${ClaudeHint} g=${g} again />`}
       ${emojiOpen && html`<${EmojiPanel} class="for-composer" onPick=${insert} onClose=${() => setEmojiOpen(false)} />`}
       ${reply && html`
         <div class="reply-bar">

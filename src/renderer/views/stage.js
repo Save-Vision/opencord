@@ -124,7 +124,8 @@ export function connLabel (call) {
   if (call.state !== 'connected') return { text: call.state === 'new' ? 'connecting…' : call.state + '…', cls: 'warn' }
   const s = call.stats
   if (!s) return { text: 'connected', cls: 'good' }
-  const where = s.path === 'lan' ? 'LAN' : 'direct'
+  // 'relay': no direct route, so the call runs through the chat connection (voice.js _openTunnel)
+  const where = s.path === 'lan' ? 'LAN' : s.path === 'relay' ? 'via chat link' : 'direct'
   return { text: `${s.rtt != null ? s.rtt + ' ms · ' : ''}${where}${s.family ? ' · ' + s.family : ''}`, cls: s.rtt != null && s.rtt > 120 ? 'warn' : 'good' }
 }
 

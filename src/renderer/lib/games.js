@@ -14,6 +14,7 @@
 // player whose turn it is (for one ply, the first such move its author signed wins).
 
 import { START, fromFen, legalMoves, findMove, play, san, outcome, positionKey, uci } from './chess.js'
+import { cleanPokerInfo } from './poker.js'
 
 const isKey = (k) => typeof k === 'string' && /^[0-9a-f]{64}$/.test(k)
 
@@ -28,6 +29,7 @@ export const TIME_CONTROLS = [
 export const tcLabel = (tc) => !tc ? 'No clock' : (tc.base / 60000) + (tc.inc ? ' + ' + tc.inc / 1000 : ' min')
 
 export function cleanGameInfo (d) {
+  if (d && typeof d === 'object' && d.kind === 'poker') return cleanPokerInfo(d)
   if (!d || typeof d !== 'object' || d.kind !== 'chess') return null
   let tc = null
   if (d.tc && typeof d.tc === 'object' && Number.isFinite(d.tc.base) && d.tc.base >= 30000 && d.tc.base <= 3 * 3600000) {

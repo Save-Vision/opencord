@@ -7,6 +7,8 @@ import { Icon } from '../lib/icons.js'
 import { Avatar, startDmCall } from './chat.js'
 import { useNetStatus, hasProblem } from './nethealth.js'
 import { addFriendByKey, acceptFriend, openDm, removeFriendFlow } from './friends.js'
+import { versionNote } from './compat.js'
+import { STATUS_LABEL } from '../lib/presence.js'
 
 export function openMemberMenu (e, g, key) {
   e.preventDefault()
@@ -28,10 +30,10 @@ export function Members ({ g }) {
   const online = []
   const offline = []
   for (const m of model.membersOf(g)) {
-    if (m.key === model.me.key || g.online.has(m.key)) online.push(m)
+    if (model.presence(g, m.key) !== 'offline') online.push(m)
     else offline.push(m)
   }
-  if (!g.members.has(model.me.key)) online.unshift({ key: model.me.key })
+  if (!g.members.has(model.me.key) && model.presence(g, model.me.key) !== 'offline') online.unshift({ key: model.me.key })
   const rank = (k) => (k === g.owner ? 0 : g.admins.has(k) ? 1 : 2)
   const byName = (a, b) => rank(a.key) - rank(b.key) || model.memberName(g, a.key).localeCompare(model.memberName(g, b.key))
   online.sort(byName)
@@ -42,13 +44,14 @@ export function Members ({ g }) {
     const info = g.online.get(k)
     const vs = g.voice.get(k) || (me && voice.active?.gid === g.id ? { ch: voice.active.ch } : null)
     const vch = vs?.ch ? g.channels.get(vs.ch) : null
-    const sub = vch
+    const pres = model.presence(g, k)
+    const sub = vch && isOnline
       ? html`<${Icon} name="speaker" size=${12} /> ${vch.name}`
-      : me ? 'You' : isOnline ? (info?.rtt != null ? `${info.rtt} ms · ${info.lan ? 'LAN' : 'direct'}` : 'Online') : 'Offline'
+      : me ? (pres === 'away' ? 'You · Away' : 'You') : !isOnline ? 'Offline' : pres === 'away' ? 'Away' : (info?.rtt != null ? `${info.rtt} ms · ${info.lan ? 'LAN' : 'direct'}` : 'Online')
     return html`
-      <div key=${k} class="member ${isOnline ? '' : 'off'}" title=${`${model.memberName(g, k)}\nKey ${k}\nRight-click for options`}
+      <div key=${k} class="member ${isOnline ? '' : 'off'} ${pres === 'away' ? 'away' : ''}" title=${`${model.memberName(g, k)}\nKey ${k}\nClick for profile and options`}
         onClick=${(e) => openMemberMenu(e, g, k)} onContextMenu=${(e) => openMemberMenu(e, g, k)}>
-        <${Avatar} name=${model.memberName(g, k)} color=${model.memberColor(g, k)} src=${model.memberAvatar(g, k)} size=${32} dot=${isOnline ? 'online' : 'offline'} speaking=${voice.speaking.has(k)} />
+        <${Avatar} name=${model.memberName(g, k)} color=${model.memberColor(g, k)} src=${model.memberAvatar(g, k)} size=${32} dot=${pres} speaking=${voice.speaking.has(k)} />
         <div><b style=${{ color: isOnline ? model.memberColor(g, k) : undefined }}>${model.memberName(g, k)}<${RoleBadge} g=${g} k=${k} /></b><small>${sub}</small></div>
       </div>`
   }
@@ -69,14 +72,17 @@ export function DmProfile ({ g }) {
   const info = g.online.get(k)
   const friend = model.isFriend(k)
   const inCall = g.voice.get(k)?.ch === DM_CALL
+  const pres = model.presence(g, k)
+  const ver = versionNote(info)
   return html`
     <aside class="members dm-profile">
       <div class="dm-card">
         <div class="dm-banner" style=${{ '--c': model.memberColor(g, k) }} />
-        <${Avatar} name=${name} color=${model.memberColor(g, k)} src=${model.memberAvatar(g, k)} size=${84} dot=${info ? 'online' : 'offline'} />
+        <${Avatar} name=${name} color=${model.memberColor(g, k)} src=${model.memberAvatar(g, k)} size=${84} dot=${pres} />
         <h3>${name}</h3>
         <small class="mono" title=${k}>${shortKey(k)}</small>
-        <div class="dm-status">${info ? (info.rtt != null ? `Online · ${info.rtt} ms · ${info.lan ? 'same network' : 'direct'}` : 'Online') : friend ? 'Offline' : 'Friend request pending'}${inCall ? ' · in a call' : ''}</div>
+        <div class="dm-status">${pres !== 'offline' ? (pres === 'away' ? 'Away' : info?.rtt != null ? `Online · ${info.rtt} ms · ${info.lan ? 'same network' : 'direct'}` : 'Online') : friend ? 'Offline' : 'Friend request pending'}${inCall && pres !== 'offline' ? ' · in a call' : ''}</div>
+        ${ver && pres !== 'offline' && html`<small class="pc-version ${ver.cls}" title=${ver.hint}>${ver.text}</small>`}
         <div class="dm-actions">
           <button class="btn primary" onClick=${() => startDmCall(g)}><${Icon} name="phone" size=${16} /> ${inCall && !voice.inChannel(g.id, DM_CALL) ? 'Join call' : 'Call'}</button>
           <button class="btn danger-ghost" onClick=${() => removeFriendFlow(k)}>${friend ? 'Remove friend' : 'Cancel request'}</button>
@@ -174,16 +180,28 @@ export function MemberMenu () {
     model.toast(ch ? `Moved ${name} to ${ch.name}` : `Disconnected ${name}`)
   }
   const targets = model.channelsOf(g, 'voice').filter(c => c.id !== vs?.ch)
+  const pres = model.presence(g, k)
+  const info = g.online.get(k)
+  const ver = !me && pres !== 'offline' ? versionNote(info) : null
+  const vch = vs?.ch && pres !== 'offline' ? g.channels.get(vs.ch) : null
+  const shared = [...model.groups.values()].filter(x => x.id !== g.id && !x.dm && x.members.has(k) && !x.removed.has(k)).map(x => model.groupName(x))
+  const readsClaude = me ? !!model.me.claude : !!g.members.get(k)?.claude
 
   return html`
-    <div class="ctx-menu" ref=${ref} style=${pos || { left: m.x + 'px', top: m.y + 'px', visibility: 'hidden' }} onContextMenu=${(e) => e.preventDefault()}>
-      <div class="ctx-head">
-        <${Avatar} name=${name} color=${model.memberColor(g, k)} src=${model.memberAvatar(g, k)} size=${40} dot=${me || g.online.has(k) ? 'online' : 'offline'} />
-        <div>
-          <b>${name}${me ? ' (you)' : ''}</b>
-          <small class="mono">${shortKey(k)}</small>
-          ${role !== 'member' && !g.dm && html`<small class="ctx-role ${role}"><${Icon} name=${role === 'owner' ? 'crown' : 'shieldPlain'} size=${12} /> ${role === 'owner' ? 'Owner' : 'Admin'}</small>`}
+    <div class="ctx-menu profile-menu" ref=${ref} style=${pos || { left: m.x + 'px', top: m.y + 'px', visibility: 'hidden' }} onContextMenu=${(e) => e.preventDefault()}>
+      <div class="profile-card">
+        <div class="pc-banner" style=${{ '--c': model.memberColor(g, k) }} />
+        <${Avatar} name=${name} color=${model.memberColor(g, k)} src=${model.memberAvatar(g, k)} size=${64} dot=${pres} />
+        <b class="pc-name">${name}${me ? ' (you)' : ''}</b>
+        <small class="mono" title=${k}>${shortKey(k)}</small>
+        <div class="pc-tags">
+          <span class="pc-status ${pres}"><i class="presence ${pres}" /> ${STATUS_LABEL[pres]}</span>
+          ${role !== 'member' && !g.dm && html`<span class="ctx-role ${role}"><${Icon} name=${role === 'owner' ? 'crown' : 'shieldPlain'} size=${12} /> ${role === 'owner' ? 'Owner' : 'Admin'}</span>`}
+          ${vch && vch.kind === 'voice' && html`<span><${Icon} name="speaker" size=${12} /> ${vch.name}</span>`}
         </div>
+        ${shared.length > 0 && html`<small class="pc-meta">Also in ${shared.slice(0, 3).join(', ')}${shared.length > 3 ? ` and ${shared.length - 3} more` : ''}</small>`}
+        ${readsClaude && html`<small class="pc-meta"><${Icon} name="sparkle" size=${11} /> Lets Claude read ${me ? 'your' : 'their'} messages</small>`}
+        ${ver && html`<small class="pc-version ${ver.cls}" title=${ver.hint}>${ver.text}${ver.cls === 'older' ? ' · older than yours' : ''}</small>`}
       </div>
       ${!me && html`
         <div class="ctx-group">

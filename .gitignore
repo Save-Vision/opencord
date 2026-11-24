@@ -1,4 +1,6 @@
 node_modules/
 dist/
+# throwaway test builds (electron-builder -c.directories.output=dist-<name>)
+dist-*/
 # e2e screenshots can contain your real screen when run with REAL_CAPTURE=1
 test/screenshots/

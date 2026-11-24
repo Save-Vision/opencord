@@ -476,3 +476,87 @@ test('storage: deleted and outdated entries are erased from disk and sync as stu
   bob.store.compact(gb)
   assert.ok(!onDisk(bob, gid).includes('wrong chat'))
 })
+
+test('the secret key is sealed on disk, and an account this PC can\'t unlock is never replaced silently', () => {
+  const dir = path.join(tmpRoot, 'sealed')
+  const seal = (s) => 'X' + Buffer.from(s).toString('base64')
+  const unseal = (b) => { if (b[0] !== 'X') throw new Error('nope'); return Buffer.from(b.slice(1), 'base64').toString() }
+  const a = new Store(dir).load({ seal, unseal })
+  const key = a.myKey
+  const onDisk = JSON.parse(fs.readFileSync(path.join(dir, 'identity.json'), 'utf8'))
+  assert.ok(onDisk.seedEnc && !onDisk.seed, 'only the sealed seed is stored')
+  assert.ok(a.sealed)
+  assert.strictEqual(new Store(dir).load({ seal, unseal }).myKey, key)
+  // another PC's keychain can't open it
+  assert.throws(() => new Store(dir).load({ seal, unseal: () => { throw new Error('DPAPI') } }), (e) => e.code === 'IDENTITY_LOCKED')
+  // an old plain seed gets sealed on the next start
+  const dir2 = path.join(tmpRoot, 'plain')
+  const plain = new Store(dir2).load()
+  assert.ok(!plain.sealed)
+  assert.strictEqual(new Store(dir2).load({ seal, unseal }).myKey, plain.myKey)
+  assert.ok(JSON.parse(fs.readFileSync(path.join(dir2, 'identity.json'), 'utf8')).seedEnc)
+  // set aside, not deleted
+  const stash = Store.setAside(dir2, 'locked')
+  assert.ok(fs.existsSync(path.join(stash, 'identity.json')))
+  assert.notStrictEqual(new Store(dir2).load().myKey, plain.myKey)
+})
+
+test('backup and restore: password-locked, and restored chats stay read-only until a friend syncs', async (t) => {
+  const alice = await makeNode('alice-b')
+  const bob = await makeNode('bob-b')
+  t.after(async () => { await Promise.all([alice.net.stop(), bob.net.stop()]) })
+  const group = alice.store.createGroup('Backups')
+  alice.net.joinGroup(group)
+  const { group: bg } = bob.store.joinGroup(alice.store.inviteFor(group.id))
+  bob.net.joinGroup(bg)
+  for (let i = 0; i < 3; i++) alice.net.broadcastOps(group.id, [alice.store.append(group.id, 'msg', { id: 'b' + i, ch: 'x', text: 'before backup ' + i })])
+  await waitFor(() => texts(bob, group.id).length === 3, 15000, 'bob to get the messages')
+
+  assert.throws(() => alice.store.exportBackup('short'), /8 characters/)
+  const file = alice.store.exportBackup('correct horse battery')
+  assert.ok(!file.includes('before backup') && !file.includes(alice.store.seed.toString('hex')), 'nothing readable inside')
+  assert.throws(() => Store.openBackup(file, 'wrong password!'), /Wrong password/)
+  const b = Store.openBackup(file, 'correct horse battery')
+  assert.strictEqual(b.identity.name, 'alice-b')
+
+  // Alice's PC dies; she restores on a new one
+  await alice.net.stop()
+  const fresh = new Store(path.join(tmpRoot, 'alice-new')).load()
+  fresh.restoreBackup(b)
+  const restored = new Store(path.join(tmpRoot, 'alice-new')).load()
+  assert.strictEqual(restored.myKey, alice.store.myKey)
+  const rg = restored.groups.get(group.id)
+  assert.ok(rg.restoring)
+  // posting now could reuse sequence numbers her friends already have: refused
+  assert.throws(() => restored.append(group.id, 'msg', { id: 'z', ch: 'x', text: 'too early' }), (e) => e.code === 'RESTORING')
+  const net = new Network(restored, { bootstrap: testnet.bootstrap, authTimeout: 1500 })
+  const done = new Promise(resolve => net.on('restored', resolve))
+  t.after(() => net.stop())
+  await net.start()
+  net.joinGroup(rg)
+  await done
+  assert.ok(!restored.groups.get(group.id).restoring)
+  assert.ok(restored.groups.get(group.id).ops.filter(o => o.k === 'msg').length >= 3, 'history came back from bob')
+  const op = restored.append(group.id, 'msg', { id: 'after', ch: 'x', text: 'back again' })
+  net.broadcastOps(group.id, [op])
+  await waitFor(() => texts(bob, group.id).includes('back again'), 10000, 'bob to accept the new message')
+})
+
+test('versions: apps too far apart are told who has to update instead of half-syncing', async (t) => {
+  const old = await makeNode('old-v')
+  const store = new Store(path.join(tmpRoot, 'new-v')).load()
+  store.setProfile({ name: 'new-v' })
+  const net = new Network(store, { bootstrap: testnet.bootstrap, authTimeout: 1500, proto: 9, minProto: 9 })
+  t.after(async () => { await Promise.all([old.net.stop(), net.stop()]) })
+  await net.start()
+  const group = old.store.createGroup('Versions')
+  old.net.joinGroup(group)
+  const { group: ng } = store.joinGroup(old.store.inviteFor(group.id))
+  net.joinGroup(ng)
+  const oldSees = await waitFor(() => old.net.compatInfo()[0], 20000, 'old app to notice')
+  const newSees = await waitFor(() => net.compatInfo()[0], 20000, 'new app to notice')
+  assert.strictEqual(oldSees.reason, 'update-me')
+  assert.strictEqual(newSees.reason, 'update-them')
+  assert.deepStrictEqual(oldSees.groups, [group.id])
+  assert.strictEqual(old.net.onlinePeers().length, 0, 'no syncing across the gap')
+})

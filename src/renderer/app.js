@@ -1,4 +1,4 @@
-import { html, render, useEffect } from './vendor/preact-htm.js'
+import { html, render, useEffect, useState, useRef } from './vendor/preact-htm.js'
 import { api, model, voice, useModel, initials, handleNewOps, onBlobProgress, retryMissingBlobs } from './lib/core.js'
 import { shortKey, HOME, DM_CALL } from './lib/model.js'
 import { Icon } from './lib/icons.js'
@@ -13,6 +13,12 @@ import { Members, DmProfile, MemberMenu } from './views/members.js'
 import { HomeSidebar, FriendsPage, CallBanner, homeUnread, openDm } from './views/friends.js'
 import { Sidebar } from './views/sidebar.js'
 import { GamesView, notifyGameOps } from './views/games.js'
+import { SearchPanel } from './views/search.js'
+import { UpdateRequired } from './views/compat.js'
+import { AccountNote } from './views/account.js'
+import { SoundboardButton, onRemoteSound } from './views/soundboard.js'
+import { announceStatus, setMyStatus, startPresence, STATUS_LABEL } from './lib/presence.js'
+import { startPoker } from './lib/pokerplay.js'
 
 // ---------------------------------------------------------------- shell
 
@@ -25,6 +31,7 @@ function App () {
   const games = !stage && g && model.ui.games?.gid === g.id
   const planner = !stage && !games && g && model.ui.planner?.gid === g.id
   const thread = !stage && !planner && g && model.ui.thread?.gid === g.id
+  const search = !stage && !planner && g && model.ui.search?.gid === g.id
   // A board has its chat in the thread next to it; the games list has nothing on the side
   const side = g && !stage && !planner && !(games && !model.ui.games.id)
 
@@ -36,7 +43,7 @@ function App () {
     api.setUnread(total)
   })
 
-  if (!model.me.name) return html`<${TitleBar} /><${Onboarding} /><${Toasts} />`
+  if (!model.me.name) return html`<${TitleBar} /><${Onboarding} /><${Modals} /><${Toasts} />`
 
   const footer = html`${voice.active && voice.active.gid && html`<${VoicePanel} />`}<${UserPanel} />`
   return html`
@@ -47,6 +54,7 @@ function App () {
         ? html`<${HomeSidebar} g=${g} footer=${footer} />`
         : g ? html`<${Sidebar} g=${g} ch=${ch} stage=${stage} footer=${footer} />` : html`<aside class="sidebar"><div class="channels" />${footer}</aside>`}
       <main class="main">
+        <${AccountNote} />
         ${home && !g
           ? html`<${FriendsPage} />`
           : !g
@@ -61,11 +69,14 @@ function App () {
                   ? html`<${ChatView} g=${g} ch=${ch} />`
                   : html`<${Syncing} g=${g} />`}
       </main>
-      ${side && (thread ? html`<${ThreadPanel} key=${model.ui.thread.id} g=${g} />` : g.dm ? html`<${DmProfile} g=${g} />` : html`<${Members} g=${g} />`)}
+      ${search
+        ? html`<${SearchPanel} g=${g} />`
+        : side && (thread ? html`<${ThreadPanel} key=${model.ui.thread.id} g=${g} />` : g.dm ? html`<${DmProfile} g=${g} />` : html`<${Members} g=${g} />`)}
     </div>
     <${CallBanner} />
     <${MemberMenu} />
     <${Modals} />
+    <${UpdateRequired} />
     <${Toasts} />`
 }
 
@@ -156,6 +167,7 @@ function VoicePanel () {
       <div class="vp-actions">
         <button class="btn ${voice.local.cam ? 'on' : ''}" onClick=${() => voice.toggleCamera()} title="Camera"><${Icon} name=${voice.local.cam ? 'camera' : 'cameraOff'} size=${18} /></button>
         <button class="btn ${voice.local.screen ? 'on' : ''}" onClick=${() => voice.local.screen ? voice.stopScreen() : model.openModal('screen')} title=${voice.local.screen ? 'Stop sharing' : 'Share screen'}><${Icon} name="screenUp" size=${18} /></button>
+        ${g && !g.dm && html`<${SoundboardButton} g=${g} />`}
         <button class="btn" onClick=${open} title="Open call view"><${Icon} name="maximize" size=${18} /></button>
       </div>
     </div>`
@@ -171,12 +183,43 @@ function StreamWatchers ({ g }) {
     </div>`
 }
 
+function StatusMenu ({ onClose }) {
+  const ref = useRef()
+  useEffect(() => {
+    const off = (e) => { if (ref.current && !ref.current.contains(e.target)) onClose() }
+    const esc = (e) => { if (e.key === 'Escape') onClose() }
+    setTimeout(() => document.addEventListener('mousedown', off), 0)
+    window.addEventListener('keydown', esc)
+    return () => { document.removeEventListener('mousedown', off); window.removeEventListener('keydown', esc) }
+  }, [])
+  const cur = model.settings.status || 'online'
+  const opt = (s, hint) => html`
+    <button class=${cur === s ? 'active' : ''} onClick=${() => { onClose(); setMyStatus(s) }}>
+      <i class="presence ${s === 'invisible' ? 'offline' : s}" />
+      <div><b>${STATUS_LABEL[s]}</b><small>${hint}</small></div>
+      ${cur === s && html`<${Icon} name="check" size=${14} />`}
+    </button>`
+  return html`
+    <div class="status-menu" ref=${ref}>
+      ${opt('online', Number(model.settings.autoAway) ? `Away after ${model.settings.autoAway} min without input` : 'Always online')}
+      ${opt('away', "Friends see you're not at your PC")}
+      ${opt('invisible', "You look offline but can still chat")}
+      <button class="status-profile" onClick=${() => { onClose(); model.openModal('settings', { tab: 'profile' }) }}><${Icon} name="settings" size=${14} /><span>Edit profile</span></button>
+    </div>`
+}
+
 function UserPanel () {
   const me = model.me
+  const [menu, setMenu] = useState(false)
+  const pres = model.presence(null, me.key)
+  const st = model.myStatus()
   return html`
     <div class="user-panel">
-      <${Avatar} name=${me.name} color=${me.color} src=${me.avatar} size=${34} dot="online" speaking=${voice.speaking.has(me.key)} />
-      <div class="up-name" title=${'Public key ' + me.key}><b>${me.name}</b><small>${shortKey(me.key)}</small></div>
+      ${menu && html`<${StatusMenu} onClose=${() => setMenu(false)} />`}
+      <button class="up-me" title="Set your status" onClick=${() => setMenu(!menu)}>
+        <${Avatar} name=${me.name} color=${me.color} src=${me.avatar} size=${34} dot=${pres} speaking=${voice.speaking.has(me.key)} />
+        <div class="up-name" title=${'Public key ' + me.key}><b>${me.name}</b><small>${st === 'online' ? shortKey(me.key) : STATUS_LABEL[st] + (st === 'away' && model.settings.status !== 'away' ? ' (idle)' : '')}</small></div>
+      </button>
       <button class="icon-btn ${voice.muted || voice.serverMuted ? 'bad' : ''}" title=${voice.serverMuted ? 'Muted by a moderator' : voice.muted ? 'Unmute' : 'Mute'} onClick=${() => voice.toggleMute()}><${Icon} name=${voice.muted || voice.serverMuted ? 'micOff' : 'mic'} size=${18} /></button>
       <button class="icon-btn ${voice.deafened ? 'bad' : ''}" title=${voice.deafened ? 'Undeafen' : 'Deafen'} onClick=${() => voice.toggleDeafen()}><${Icon} name=${voice.deafened ? 'headphonesOff' : 'headphones'} size=${18} /></button>
       <button class="icon-btn" title="Settings" onClick=${() => model.openModal('settings')}><${Icon} name="settings" size=${18} /></button>
@@ -218,6 +261,7 @@ function Onboarding () {
         <h1>Welcome to OpenDiscord</h1>
         <p>Your identity is a key pair that was just generated on this device. Pick a name your friends will see.</p>
         <${ProfileEditor} cta="Continue" />
+        <p class="hint onboarding-restore">Used OpenDiscord before? <a onClick=${() => model.openModal('restore')}>Restore from a backup</a></p>
       </div>
     </div>`
 }
@@ -244,6 +288,9 @@ async function boot () {
   model.platform = init.platform
   model.profile = init.profile
   model.version = init.version
+  model.compat = init.compat || []
+  model.accountNote = init.accountNote || null
+  model.forceRelay = !!init.forceRelay
   model.setFriends(init.friends)
   model.setJoins(init.joins)
   document.body.classList.add('platform-' + init.platform)
@@ -267,6 +314,7 @@ async function boot () {
   api.on('group-removed', (gid) => model.removeGroup(gid))
   api.on('joins', (list) => model.setJoins(list))
   api.on('notice', (n) => model.toast(n.text, n.kind))
+  api.on('compat', (list) => { model.compat = list || []; model.emit() })
   api.on('open-link', (url) => model.openModal('openLink', { url }))
 
   api.on('ops', (gid, ops) => {
@@ -289,6 +337,7 @@ async function boot () {
     model.peerJoin(gid, key, info)
     retryMissingBlobs()
     voice.onPeerOnline(gid, key)
+    announceStatus(gid, key)
   })
   api.on('peer-leave', (gid, key) => {
     model.peerLeave(gid, key)
@@ -318,6 +367,12 @@ async function boot () {
       case 'claude':
         model.setClaudeDraft(gid, from, d)
         break
+      case 'status':
+        model.setStatus(from, d.s)
+        break
+      case 'sound':
+        onRemoteSound(gid, from, d)
+        break
     }
   })
   api.on('blob-progress', onBlobProgress)
@@ -329,11 +384,14 @@ async function boot () {
   window.addEventListener('keydown', (e) => {
     if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === 'm') { e.preventDefault(); voice.toggleMute() }
     if (e.ctrlKey && e.key === ',') { e.preventDefault(); model.openModal('settings') }
+    if (e.ctrlKey && !e.shiftKey && e.key.toLowerCase() === 'f' && model.me?.name && !model.ui.modal) { e.preventDefault(); model.openSearch(model.ui.search?.q || '') }
   })
   window.addEventListener('beforeunload', () => voice.leave(true))
   window.__od = { model, voice } // handy for poking around in DevTools (Ctrl+Shift+I)
   startReminders({ api })
   loadClaudeInfo()
+  startPresence()
+  startPoker()
 
   render(html`<${App} />`, document.getElementById('root'))
 }

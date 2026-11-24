@@ -14,6 +14,7 @@
 const fs = require('fs')
 const path = require('path')
 const zlib = require('zlib')
+const nodeCrypto = require('crypto')
 const { EventEmitter } = require('events')
 const c = require('./crypto')
 
@@ -61,6 +62,12 @@ function diskLine (op) {
   return JSON.stringify(rest)
 }
 
+// A password-protected copy of your account (Settings → Account): your identity, the keys of
+// your groups and private chats, and your friends. History isn't in it: it syncs back from
+// friends after a restore.
+const BACKUP_KIND = 'opendiscord-backup'
+const SCRYPT = { N: 1 << 15, r: 8, p: 1, maxmem: 128 * 1024 * 1024 }
+
 const DEFAULT_SETTINGS = {
   // STUN servers only tell your computer its public IP:port so WebRTC can hole-punch.
   // They never see or forward any audio/video. TURN (relay) servers are not supported.
@@ -92,7 +99,13 @@ const DEFAULT_SETTINGS = {
   autoUpdate: true,
   // @claude: which model answers, and whether it may search the web (the API key itself is
   // kept encrypted in claude.json, see claude.js)
-  claude: { model: 'claude-opus-5-5', web: false }
+  claude: { model: 'claude-opus-5-5', web: false },
+  // Join/leave/mute chimes and the soundboard
+  sounds: { volume: 0.6, voice: true, soundboard: true, soundboardVolume: 0.7 },
+  // What friends see: 'online' | 'away' | 'invisible' (appear offline). Online turns to away
+  // after autoAway minutes without input (0 = never).
+  status: 'online',
+  autoAway: 10
 }
 
 const COLORS = ['#2dd4bf', '#f472b6', '#fbbf24', '#60a5fa', '#a78bfa', '#f87171', '#4ade80', '#fb923c']
@@ -140,18 +153,33 @@ class Store extends EventEmitter {
     }
   }
 
-  load () {
+  // seal/unseal (optional): encrypt the identity's secret with the OS keychain (Electron
+  // safeStorage: DPAPI on Windows), so a copy of the data folder alone can't impersonate you.
+  load ({ seal = null, unseal = null } = {}) {
     fs.mkdirSync(this.groupsDir, { recursive: true })
     fs.mkdirSync(this.blobsDir, { recursive: true })
+    this.seal = seal
 
     const idFile = path.join(this.dir, 'identity.json')
     let identity = readJSON(idFile, null)
-    if (!identity || typeof identity.seed !== 'string' || identity.seed.length !== 64) {
-      identity = { seed: c.randomBytes(32).toString('hex'), name: '', color: COLORS[Math.floor(Math.random() * COLORS.length)] }
-      writeJSONAtomic(idFile, identity)
+    let seedHex = null
+    if (identity && typeof identity.seedEnc === 'string') {
+      try { seedHex = unseal ? unseal(identity.seedEnc) : null } catch {}
+      if (!/^[0-9a-f]{64}$/.test(seedHex || '')) {
+        const err = new Error('This account was encrypted for another Windows user or PC')
+        err.code = 'IDENTITY_LOCKED'
+        throw err
+      }
+    } else if (identity && /^[0-9a-f]{64}$/.test(identity.seed || '')) {
+      seedHex = identity.seed
+    } else {
+      identity = { name: '', color: COLORS[Math.floor(Math.random() * COLORS.length)] }
+      seedHex = c.randomBytes(32).toString('hex')
+      identity.seed = seedHex
     }
     this.identity = identity
-    this.seed = Buffer.from(identity.seed, 'hex')
+    this._sealSeed(seedHex)
+    this.seed = Buffer.from(seedHex, 'hex')
     this.keyPair = c.keyPair(this.seed)
     this.myKey = this.keyPair.publicKey.toString('hex')
 
@@ -168,6 +196,127 @@ class Store extends EventEmitter {
       if (g.hotBytes > 16 * 1024 || g.hotDirty || g.segs.some(s => s.dirty)) this.compact(g)
     }
     return this
+  }
+
+  // identity.json keeps the secret encrypted when the OS can (and plain otherwise, e.g. Linux
+  // without a keyring)
+  _sealSeed (seedHex) {
+    let enc = null
+    try { enc = this.seal ? this.seal(seedHex) : null } catch {}
+    if (enc) { this.identity.seedEnc = enc; delete this.identity.seed } else if (!this.identity.seedEnc) this.identity.seed = seedHex
+    writeJSONAtomic(path.join(this.dir, 'identity.json'), this.identity)
+  }
+
+  get sealed () { return !!this.identity.seedEnc }
+
+  // ---- backup & restore ----
+
+  exportBackup (password) {
+    if (typeof password !== 'string' || password.length < 8) throw new Error('Use a password with at least 8 characters')
+    const groups = []
+    for (const g of this.groups.values()) groups.push(this._metaOf(g))
+    const plain = Buffer.from(JSON.stringify({
+      kind: BACKUP_KIND,
+      v: 1,
+      created: Date.now(),
+      identity: {
+        seed: this.seed.toString('hex'),
+        name: this.identity.name,
+        color: this.identity.color,
+        avatar: this.identity.avatar || undefined,
+        claude: this.identity.claude ? true : undefined
+      },
+      groups,
+      friends: this.friends
+    }))
+    const salt = nodeCrypto.randomBytes(16)
+    const iv = nodeCrypto.randomBytes(12)
+    const key = nodeCrypto.scryptSync(password.normalize('NFC'), salt, 32, SCRYPT)
+    const cipher = nodeCrypto.createCipheriv('aes-256-gcm', key, iv)
+    const data = Buffer.concat([cipher.update(plain), cipher.final()])
+    return JSON.stringify({
+      kind: BACKUP_KIND,
+      v: 1,
+      key: this.myKey,
+      name: this.identity.name,
+      created: Date.now(),
+      kdf: { name: 'scrypt', N: SCRYPT.N, r: SCRYPT.r, p: SCRYPT.p, salt: salt.toString('base64') },
+      iv: iv.toString('base64'),
+      tag: cipher.getAuthTag().toString('base64'),
+      data: data.toString('base64')
+    }, null, 1)
+  }
+
+  // Decrypts and checks a backup file. Throws a message the user can act on.
+  static openBackup (text, password) {
+    let f
+    try { f = JSON.parse(String(text)) } catch { throw new Error("That isn't an OpenDiscord backup file") }
+    if (!f || f.kind !== BACKUP_KIND || f.v !== 1 || !f.kdf || f.kdf.name !== 'scrypt') throw new Error("That isn't an OpenDiscord backup file")
+    const N = Number(f.kdf.N)
+    if (!(N >= 1024 && N <= (1 << 20) && (N & (N - 1)) === 0)) throw new Error('This backup file is damaged')
+    let plain
+    try {
+      const key = nodeCrypto.scryptSync(String(password || '').normalize('NFC'), Buffer.from(f.kdf.salt, 'base64'), 32, { N, r: Number(f.kdf.r) || 8, p: Number(f.kdf.p) || 1, maxmem: 256 * 1024 * 1024 })
+      const d = nodeCrypto.createDecipheriv('aes-256-gcm', key, Buffer.from(f.iv, 'base64'))
+      d.setAuthTag(Buffer.from(f.tag, 'base64'))
+      plain = Buffer.concat([d.update(Buffer.from(f.data, 'base64')), d.final()])
+    } catch {
+      throw new Error('Wrong password (or the file is damaged)')
+    }
+    const b = JSON.parse(plain.toString('utf8'))
+    if (b.kind !== BACKUP_KIND || !/^[0-9a-f]{64}$/.test(b.identity?.seed || '') || !Array.isArray(b.groups)) throw new Error('This backup file is damaged')
+    return b
+  }
+
+  // Replaces the account on this PC with the one from a backup. What was here moves to a
+  // "replaced-…" folder (nothing is deleted); files stay, as they're shared by content.
+  // Every group starts out "restoring": see noteVector.
+  // Moves the account files (not settings or files) into a folder next to them
+  static setAside (dir, label) {
+    const stash = path.join(dir, label + '-' + new Date().toISOString().replace(/[:.]/g, '-'))
+    fs.mkdirSync(stash, { recursive: true })
+    for (const name of ['identity.json', 'friends.json', 'joins.json', 'groups']) {
+      const from = path.join(dir, name)
+      if (fs.existsSync(from)) fs.renameSync(from, path.join(stash, name))
+    }
+    return stash
+  }
+
+  restoreBackup (b) {
+    const stash = Store.setAside(this.dir, 'replaced')
+    fs.mkdirSync(this.groupsDir, { recursive: true })
+    const id = b.identity
+    this.identity = { name: String(id.name || '').slice(0, 32), color: /^#[0-9a-f]{6}$/i.test(id.color || '') ? id.color : COLORS[0] }
+    if (isAvatar(id.avatar)) this.identity.avatar = id.avatar
+    if (id.claude) this.identity.claude = true
+    this._sealSeed(id.seed)
+    for (const meta of b.groups) {
+      if (!meta || !/^[0-9a-f]{32}$/.test(meta.id || '') || !(meta.secret || meta.epochs)) continue
+      fs.mkdirSync(this._groupDir(meta.id), { recursive: true })
+      writeJSONAtomic(path.join(this._groupDir(meta.id), 'meta.json'), { ...meta, restoring: true })
+    }
+    const fr = b.friends || {}
+    writeJSONAtomic(this._friendsFile(), { incoming: fr.incoming || {}, outgoing: fr.outgoing || {}, links: fr.links || {} })
+    return stash
+  }
+
+  // After a restore, our own old ops come back from friends first: posting before that would
+  // reuse op numbers they already hold. So a restored group stays read-only until a friend's app
+  // told us (in its sync request) how many of our ops it has, and we have at least as many.
+  noteVector (groupId, vec) {
+    const g = this.groups.get(groupId)
+    if (!g || !g.restoring) return false
+    g.ownSeen = Math.max(g.ownSeen || 0, Number(vec?.[this.myKey]) || 0)
+    g.vecSeen = true
+    return this._checkRestored(g)
+  }
+
+  _checkRestored (g) {
+    if (!g.restoring || !g.vecSeen) return false
+    if ((g.byAuthor.get(this.myKey)?.length || 0) < g.ownSeen) return false
+    g.restoring = false
+    this._saveMeta(g)
+    return true
   }
 
   _groupDir (id) { return path.join(this.groupsDir, id) }
@@ -192,7 +341,8 @@ class Store extends EventEmitter {
       admins: new Set(),
       kicks: new Map(), // key -> { epoch, upTo }: refused on keys older than `epoch`
       kickedMe: false,
-      dm: /^[0-9a-f]{64}$/.test(meta.dm || '') ? meta.dm : null // private chat with this friend
+      dm: /^[0-9a-f]{64}$/.test(meta.dm || '') ? meta.dm : null, // private chat with this friend
+      restoring: !!meta.restoring // restored from a backup and still catching up (see noteVector)
     }
     this._setEpochs(group)
     const dir = this._groupDir(group.id)
@@ -409,10 +559,10 @@ class Store extends EventEmitter {
     g.topics = [...g.epochs.values()].map(s => c.topicFromSecret(s))
   }
 
-  _saveMeta (g) {
+  _metaOf (g) {
     const epochs = {}
     for (const [e, s] of g.epochs) epochs[e] = s.toString('hex')
-    const meta = {
+    return {
       id: g.id,
       secret: g.epochs.get(Math.min(...g.epochs.keys())).toString('hex'),
       epochs,
@@ -421,6 +571,11 @@ class Store extends EventEmitter {
       nameHint: g.nameHint,
       joinedAt: g.joinedAt
     }
+  }
+
+  _saveMeta (g) {
+    const meta = this._metaOf(g)
+    if (g.restoring) meta.restoring = true
     fs.mkdirSync(this._groupDir(g.id), { recursive: true })
     writeJSONAtomic(path.join(this._groupDir(g.id), 'meta.json'), meta)
   }
@@ -506,7 +661,8 @@ class Store extends EventEmitter {
       admins: [...g.admins],
       removed: [...g.kicks.keys()].filter(k => !this.members(g).includes(k)),
       kickedMe: g.kickedMe,
-      epoch: g.epoch
+      epoch: g.epoch,
+      restoring: !!g.restoring
     }
   }
 
@@ -532,8 +688,11 @@ class Store extends EventEmitter {
 
   // ---- identity & settings ----
 
-  setProfile ({ name, color, avatar }) {
+  setProfile ({ name, color, avatar, claude }) {
     if (typeof name === 'string') this.identity.name = name.trim().slice(0, 32)
+    // "Claude may read my messages when friends ask it something" (off by default)
+    if (claude === true) this.identity.claude = true
+    else if (claude === false) delete this.identity.claude
     if (typeof color === 'string' && /^#[0-9a-f]{6}$/i.test(color)) this.identity.color = color
     if (avatar === null) delete this.identity.avatar
     else if (avatar !== undefined) {
@@ -549,11 +708,12 @@ class Store extends EventEmitter {
   profileData () {
     const d = { name: this.identity.name, color: this.identity.color }
     if (this.identity.avatar) d.avatar = this.identity.avatar
+    if (this.identity.claude) d.claude = true
     return d
   }
 
   publicIdentity () {
-    return { key: this.myKey, name: this.identity.name, color: this.identity.color, avatar: this.identity.avatar || null }
+    return { key: this.myKey, name: this.identity.name, color: this.identity.color, avatar: this.identity.avatar || null, claude: !!this.identity.claude, sealed: this.sealed }
   }
 
   setSettings (patch) {
@@ -926,6 +1086,11 @@ class Store extends EventEmitter {
     const g = this.groups.get(groupId)
     if (!g) throw new Error('Unknown group')
     if (kind === STUB) throw new Error('Reserved op kind')
+    if (g.restoring) {
+      const err = new Error('Still getting your messages back from your friends. You can post here once someone from this chat has been online.')
+      err.code = 'RESTORING'
+      throw err
+    }
     const mine = g.byAuthor.get(this.myKey) || []
     const d = data && typeof data === 'object' ? data : {}
     delete d.sup
@@ -979,6 +1144,7 @@ class Store extends EventEmitter {
       this._persist(g, result.accepted)
       for (const op of result.accepted) if (Array.isArray(op.d.sup)) this._applySup(g, op)
       if (result.accepted.some(op => MEMBERSHIP_KINDS.has(op.k))) result.membership = this._recomputeMembership(g)
+      result.restored = this._checkRestored(g)
     }
     return result
   }

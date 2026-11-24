@@ -2,6 +2,7 @@
 // deterministic way, so everyone converges on identical channels/messages/profiles.
 
 import { cleanGameInfo, deriveChess } from './games.js'
+import { derivePoker } from './poker.js'
 
 const MAX_TEXT = 4000
 const later = (t1, a1, t2, a2) => t1 > t2 || (t1 === t2 && a1 > a2)
@@ -113,6 +114,36 @@ function placeFields (d) {
   return o
 }
 
+// ---- polls ----
+// msg { poll: { q, opts: [{ id, t }], multi, ends } }; poll.vote { id, v: [option ids] } (each
+// voter's newest vote counts); poll.close { id } by the author ends it early.
+function cleanPoll (p) {
+  if (!p || typeof p !== 'object') return null
+  const q = str(p.q, 300).trim()
+  const seen = new Set()
+  const opts = (Array.isArray(p.opts) ? p.opts : []).slice(0, 10)
+    .map(o => ({ id: str(o?.id, 8), t: str(o?.t, 100).trim() }))
+    .filter(o => o.id && o.t && !seen.has(o.id) && seen.add(o.id))
+  if (!q || opts.length < 2) return null
+  return { q, opts, multi: !!p.multi, ends: Number.isFinite(p.ends) && p.ends > 0 ? p.ends : null }
+}
+
+const hexList = (v, n) => Array.isArray(v) && v.length === n && v.every(x => typeof x === 'string' && /^[0-9a-f]{64}$/.test(x)) ? v : null
+function cleanKeys (k) {
+  if (!k || typeof k !== 'object') return null
+  const out = {}
+  for (const [i, v] of Object.entries(k).slice(0, 52)) if (/^\d{1,2}$/.test(i) && typeof v === 'string' && /^[0-9a-f]{64}$/.test(v)) out[i] = v
+  return out
+}
+const POKER_OPS = new Set(['sit', 'leave', 'away', 'rebuy', 'start', 'end', 'deal', 'shuf', 'lock', 'keys', 'act', 'time', 'void'])
+
+// ---- soundboard ----
+// sound.add { id, name, emoji, h, s, m, dur } (a short clip, shared by the whole group);
+// sound.delete { id } by whoever added it, or an admin
+export const MAX_SOUNDS = 48
+export const MAX_SOUND_BYTES = 1024 * 1024
+export const MAX_SOUND_MS = 7000
+
 const newEvent = (id) => ({ id, title: '', desc: '', loc: '', day: null, allDay: false, dur: 60, start: null, remind: 15, createdAt: Infinity, createdBy: null, ts: {}, rsvp: new Map(), deleted: false })
 const newTask = (id) => ({ id, title: '', desc: '', status: 'todo', assignee: null, due: null, order: null, checklist: [], createdAt: Infinity, createdBy: null, ts: {}, deleted: false })
 
@@ -122,6 +153,7 @@ function setMembership (g, m) {
   g.admins = new Set((m.admins || []).filter(isKey))
   g.removed = new Set((m.removed || []).filter(isKey))
   g.kickedMe = !!m.kickedMe
+  g.restoring = !!m.restoring
 }
 
 function newGroup ({ id, nameHint, joinedAt, dm, membership }) {
@@ -156,6 +188,9 @@ function newGroup ({ id, nameHint, joinedAt, dm, membership }) {
     placement: new Map(), // channel id -> { folder, order, ts }
     treeV: 0, // bumped when channels or folders change (the sidebar tree is cached on it)
     games: new Map(), // msg id -> { info, by, ops, v }
+    polls: new Map(), // msg id -> { votes: Map(key -> [{ v, t, s }]), closes: [{ a, t }] }
+    sounds: new Map(), // id -> soundboard clip
+    restoring: false, // restored from a backup and still catching up (see main/store.js)
     claudeDrafts: new Map(), // msg id -> an answer Claude is still writing (live, not stored)
     owner: null,
     admins: new Set(),
@@ -180,6 +215,9 @@ export class Model {
     this.blobs = new Map() // hash -> { state: 'have'|'fetching'|'missing'|'error', r, s, err }
     this.friends = { code: '', incoming: [], outgoing: [], links: [] }
     this.joins = [] // one-time invites we're waiting to be let in with
+    this.statuses = new Map() // key -> 'online' | 'away' | 'invisible', as friends announced it
+    this.compat = [] // apps that can't sync with us because one side is too old (main/network.js)
+    this.idle = false // no input for a while (auto away)
     this.ui = {
       gid: null,
       chByGroup: {},
@@ -347,6 +385,17 @@ export class Model {
 
   openThread (gid, id) {
     this.ui.thread = { gid, id }
+    if (this.ui.search?.gid === gid) this.ui.search = null
+    this.emit()
+  }
+
+  // The search panel of the current group (views/search.js); n refocuses the box
+  openSearch (q = '') {
+    const g = this.currentGroup()
+    if (!g) return
+    this.ui.search = { gid: g.id, q, n: (this.ui.search?.n || 0) + 1 }
+    this.ui.thread = null
+    this.ui.planner = null
     this.emit()
   }
 
@@ -463,6 +512,73 @@ export class Model {
         g.treeV++
         break
       }
+      case 'poll.vote': {
+        const id = str(d.id, 32)
+        if (!id || !Array.isArray(d.v)) break
+        const p = this._poll(g, id)
+        // every vote is kept (a few), so one cast after the poll ended doesn't erase the last valid one
+        const list = p.votes.get(op.a) || []
+        list.push({ v: d.v.slice(0, 10).map(x => str(x, 8)).filter(Boolean), t: op.t, s: op.s })
+        list.sort((x, y) => x.t - y.t || x.s - y.s)
+        if (list.length > 20) list.shift()
+        p.votes.set(op.a, list)
+        break
+      }
+      case 'poll.close': {
+        const id = str(d.id, 32)
+        if (!id) break
+        const p = this._poll(g, id)
+        p.closes.push({ a: op.a, t: op.t })
+        break
+      }
+      case 'sound.add': {
+        const id = str(d.id, 32)
+        if (!id || g.sounds.has(id) || !/^[0-9a-f]{64}$/.test(d.h || '')) break
+        const s = Number(d.s) || 0
+        if (s <= 0 || s > MAX_SOUND_BYTES || !/^audio\//.test(d.m || '')) break
+        g.sounds.set(id, { id, name: str(d.name, 32).trim() || 'Sound', emoji: str(d.emoji, 16), h: d.h, s, m: str(d.m, 60), dur: Math.min(MAX_SOUND_MS, Math.max(0, Number(d.dur) || 0)), by: op.a, t: op.t, deletedBy: [] })
+        break
+      }
+      case 'sound.delete': {
+        const sd = g.sounds.get(str(d.id, 32))
+        if (sd) sd.deletedBy.push(op.a)
+        else if (str(d.id, 32)) g.sounds.set(str(d.id, 32), { id: str(d.id, 32), pendingDelete: true, deletedBy: [op.a] })
+        break
+      }
+      case 'poker.sit':
+      case 'poker.leave':
+      case 'poker.away':
+      case 'poker.rebuy':
+      case 'poker.start':
+      case 'poker.end':
+      case 'poker.deal':
+      case 'poker.shuf':
+      case 'poker.lock':
+      case 'poker.keys':
+      case 'poker.act':
+      case 'poker.time':
+      case 'poker.void': {
+        const id = str(d.id, 32)
+        const k = op.k.slice(6)
+        if (!id || !POKER_OPS.has(k)) break
+        const gm = this._game(g, id)
+        gm.ops.push({
+          k, a: op.a, s: op.s, t: op.t,
+          recv: Date.now(), // when this app learned of it: timers run on local time only
+          h: Number.isInteger(d.h) ? d.h : null,
+          n: Number.isInteger(d.n) ? d.n : -1,
+          act: str(d.a, 8),
+          to: Number.isInteger(d.to) ? d.to : null,
+          on: k === 'away' ? !!d.on : d.on !== false,
+          players: Array.isArray(d.players) ? d.players.filter(isKey).slice(0, 8) : null,
+          deck: hexList(d.deck, 52),
+          commits: hexList(d.commits, 52),
+          keys: cleanKeys(d.k)
+        })
+        gm.last = Math.max(gm.last || 0, op.t)
+        gm.v++
+        break
+      }
       case 'game.join':
       case 'game.decline':
       case 'game.move':
@@ -481,6 +597,7 @@ export class Model {
           no: !!d.no,
           recv: Date.now() // when this app learned of it: clocks run on local time only
         })
+        gm.last = Math.max(gm.last || 0, op.t)
         gm.v++
         break
       }
@@ -606,6 +723,7 @@ export class Model {
           m.name = str(d.name, 32).trim()
           if (/^#[0-9a-f]{6}$/i.test(d.color || '')) m.color = d.color
           m.avatar = isAvatarUrl(d.avatar) ? d.avatar : null
+          m.claude = !!d.claude // lets Claude read their messages when someone else asks
         }
         break
       }
@@ -626,6 +744,7 @@ export class Model {
           : []
         const th = str(d.th, 32) || null
         const game = !th && cleanGameInfo(d.game)
+        const poll = !th && !game && cleanPoll(d.poll)
         const msg = {
           id, ch, a: op.a, t: op.t, s: op.s,
           text: str(d.text, MAX_TEXT),
@@ -635,8 +754,9 @@ export class Model {
           also: !!(th && d.also), // ...also shown in the channel
           // Claude's answer: posted (and signed) by the app of whoever asked, with their API key
           bot: d.bot && typeof d.bot === 'object' && d.bot.n === 'claude' ? { model: str(d.bot.model, 40) } : null,
-          game: !!game, // the card of a chess game (see lib/games.js)
-          ping: game ? game.opp : null, // someone challenged to a game
+          game: !!game, // the card of a chess game or poker table (see lib/games.js, lib/poker.js)
+          ping: game ? game.opp || null : null, // someone challenged to a game
+          poll: poll || null,
           edited: 0,
           deleted: false,
           reactions: new Map()
@@ -718,8 +838,74 @@ export class Model {
 
   _game (g, id) {
     let gm = g.games.get(id)
-    if (!gm) { gm = { id, info: null, by: null, ch: null, t: 0, ops: [], v: 0, cacheV: -1, cache: null }; g.games.set(id, gm) }
+    if (!gm) { gm = { id, info: null, by: null, ch: null, t: 0, last: 0, ops: [], v: 0, cacheV: -1, cache: null, cards: new Map(), mine: new Map() }; g.games.set(id, gm) }
     return gm
+  }
+
+  _poll (g, id) {
+    let p = g.polls.get(id)
+    if (!p) { p = { votes: new Map(), closes: [] }; g.polls.set(id, p) }
+    return p
+  }
+
+  // ---- polls ----
+
+  // { counts, total, voters: Map(option -> keys), mine, ended, endsAt }
+  pollResults (g, m) {
+    const poll = m.poll
+    const p = g.polls.get(m.id) || { votes: new Map(), closes: [] }
+    const closedBy = p.closes.filter(c => c.a === m.a).sort((a, b) => a.t - b.t)[0]
+    const endsAt = Math.min(poll.ends || Infinity, closedBy ? closedBy.t : Infinity)
+    const ids = new Set(poll.opts.map(o => o.id))
+    const voters = new Map(poll.opts.map(o => [o.id, []]))
+    let total = 0
+    let mine = []
+    for (const [key, list] of p.votes) {
+      let vote = null
+      for (const x of list) if (x.t <= endsAt) vote = x
+      if (!vote || g.removed.has(key)) continue
+      let v = [...new Set(vote.v)].filter(x => ids.has(x))
+      if (!poll.multi) v = v.slice(0, 1)
+      if (key === this.me.key) mine = v
+      if (!v.length) continue
+      total++
+      for (const x of v) voters.get(x).push(key)
+    }
+    return { total, voters, mine, ended: Date.now() >= endsAt, endsAt: Number.isFinite(endsAt) ? endsAt : null, closed: !!closedBy }
+  }
+
+  // ---- soundboard ----
+
+  soundsOf (g) {
+    return [...g.sounds.values()]
+      .filter(s => !s.pendingDelete && !s.deletedBy.some(a => a === s.by || this.isMod(g, a)))
+      .sort((a, b) => a.t - b.t)
+      .slice(0, MAX_SOUNDS)
+  }
+
+  // ---- status (online / away / appear offline) ----
+
+  // What I show friends right now
+  myStatus () {
+    const s = this.settings?.status
+    if (s === 'invisible' || s === 'away') return s
+    return this.idle ? 'away' : 'online'
+  }
+
+  setStatus (key, s) {
+    if (!['online', 'away', 'invisible'].includes(s)) return
+    if (this.statuses.get(key) === s) return
+    this.statuses.set(key, s)
+    this.emit()
+  }
+
+  // 'online' | 'away' | 'offline' for anyone in g (or anywhere, without g)
+  presence (g, key) {
+    if (key === this.me?.key) { const s = this.myStatus(); return s === 'invisible' ? 'offline' : s }
+    const on = g ? g.online.has(key) : [...this.groups.values()].some(x => x.online.has(key))
+    if (!on) return 'offline'
+    const s = this.statuses.get(key)
+    return s === 'invisible' ? 'offline' : s === 'away' ? 'away' : 'online'
   }
 
   // ---- folders & the channel tree ----
@@ -808,8 +994,22 @@ export class Model {
   gameState (g, id) {
     const gm = g.games.get(id)
     if (!gm) return null
-    if (gm.cacheV !== gm.v) { gm.cache = deriveChess(gm); gm.cacheV = gm.v }
+    if (gm.cacheV !== gm.v) {
+      gm.cache = gm.info?.kind === 'poker' ? derivePoker(gm, (h, j) => gm.cards.get(h + ':' + j)) : deriveChess(gm)
+      gm.cacheV = gm.v
+    }
     return gm.cache
+  }
+
+  // A poker card opened by the app (lib/pokerplay.js): public ones change the game, mine don't
+  setPokerCard (g, id, h, j, card, mine = false) {
+    const gm = g.games.get(id)
+    if (!gm) return
+    const map = mine ? gm.mine : gm.cards
+    if (map.get(h + ':' + j) === card) return
+    map.set(h + ':' + j, card)
+    if (!mine) gm.v++
+    this.emit()
   }
 
   // Games whose card still exists, newest activity first
@@ -819,7 +1019,7 @@ export class Model {
       const m = g.msgById.get(gm.id)
       if (!gm.info || !m || m.deleted) continue
       const st = this.gameState(g, gm.id)
-      const last = st.plies.length ? st.plies[st.plies.length - 1].t : gm.t
+      const last = Math.max(gm.t, gm.last || 0)
       out.push({ id: gm.id, gm, st, m, last })
     }
     return out.sort((a, b) => b.last - a.last)
@@ -828,6 +1028,7 @@ export class Model {
   // Waiting on me: my move, or a challenge to me
   isMyTurn (st) {
     const me = this.me.key
+    if (st.kind === 'poker') return st.hand?.stage === 'bet' && st.hand.toAct === me
     if (st.status === 'open') return st.info.opp === me
     if (st.status !== 'active') return false
     return (st.pos.turn === 'w' ? st.white : st.black) === me
@@ -909,6 +1110,7 @@ export class Model {
     if (!g) return
     g.online.delete(key)
     g.voice.delete(key)
+    if (![...this.groups.values()].some(x => x.online.has(key))) this.statuses.delete(key)
     for (const [id, x] of g.claudeDrafts) if (x.by === key) g.claudeDrafts.delete(id)
     for (const t of g.typing.values()) t.delete(key)
     this.emit()
