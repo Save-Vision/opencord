@@ -3,6 +3,7 @@
 
 import { cleanGameInfo, deriveChess } from './games.js'
 import { derivePoker } from './poker.js'
+import { TextDoc } from './textcrdt.js'
 
 const MAX_TEXT = 4000
 const later = (t1, a1, t2, a2) => t1 > t2 || (t1 === t2 && a1 > a2)
@@ -190,6 +191,7 @@ function newGroup ({ id, nameHint, joinedAt, dm, membership }) {
     games: new Map(), // msg id -> { info, by, ops, v }
     polls: new Map(), // msg id -> { votes: Map(key -> [{ v, t, s }]), closes: [{ a, t }] }
     sounds: new Map(), // id -> soundboard clip
+    docs: new Map(), // id -> focus document (views/focus.js)
     restoring: false, // restored from a backup and still catching up (see main/store.js)
     claudeDrafts: new Map(), // msg id -> an answer Claude is still writing (live, not stored)
     owner: null,
@@ -228,7 +230,8 @@ export class Model {
       editing: null,
       thread: null, // { gid, id } open thread panel
       planner: null, // { gid, tab: 'calendar' | 'tasks' }
-      games: null // { gid, id }: the games list (id null) or one board
+      games: null, // { gid, id }: the games list (id null) or one board
+      docs: null // { gid, id }: the focus documents list (id null) or one document in focus mode
     }
     this._scheduled = false
     try { Object.assign(this.ui.chByGroup, JSON.parse(localStorage.getItem('od.chByGroup') || '{}')) } catch {}
@@ -418,6 +421,7 @@ export class Model {
   openPlanner (gid, tab) {
     this.ui.planner = { gid, tab }
     this.ui.games = null
+    this.ui.docs = null
     this.ui.stage = null
     this.ui.thread = null
     this.selectGroup(gid)
@@ -618,6 +622,29 @@ export class Model {
         if (op.k === 'invite.revoke') inv.revokedBy = [...(inv.revokedBy || []), op.a]
         inv.revoked = (inv.revokedBy || []).some(a => a === inv.by || this.isMod(g, a))
         g.invites.set(id, inv)
+        break
+      }
+      case 'doc.set': {
+        const id = str(d.id, 32)
+        if (!id) break
+        const doc = this._doc(g, id)
+        if (op.t < doc.createdAt) { doc.createdAt = op.t; doc.createdBy = op.a }
+        const name = str(d.name, 80).trim()
+        if (name && later(op.t, op.a, ...doc.nameTs)) { doc.name = name; doc.nameTs = [op.t, op.a] }
+        break
+      }
+      case 'doc.edit': {
+        const id = str(d.id, 32)
+        if (!id) break
+        const doc = this._doc(g, id)
+        doc.text.applyOp(op.a, d)
+        if (op.t > doc.editedAt) { doc.editedAt = op.t; doc.editedBy = op.a }
+        doc.editors.add(op.a)
+        break
+      }
+      case 'doc.delete': {
+        const id = str(d.id, 32)
+        if (id) this._doc(g, id).deletes.push(op.a)
         break
       }
       case 'event.set':
@@ -1034,11 +1061,61 @@ export class Model {
     return (st.pos.turn === 'w' ? st.white : st.black) === me
   }
 
+  // ---- focus documents (views/focus.js, lib/textcrdt.js) ----
+
+  _doc (g, id) {
+    let doc = g.docs.get(id)
+    if (!doc) {
+      doc = { id, name: 'Untitled', nameTs: [-1, ''], createdAt: Infinity, createdBy: null, editedAt: 0, editedBy: null, editors: new Set(), deletes: [], text: new TextDoc() }
+      g.docs.set(id, doc)
+    }
+    return doc
+  }
+
+  // A document is gone once its creator or an admin deleted it
+  docDeleted (g, doc) {
+    return doc.deletes.some(a => a === doc.createdBy || this.isMod(g, a))
+  }
+
+  docsOf (g) {
+    return [...g.docs.values()].filter(d => d.createdBy && !this.docDeleted(g, d)).sort((a, b) => Math.max(b.editedAt, b.createdAt) - Math.max(a.editedAt, a.createdAt))
+  }
+
+  openDocs (gid, id = null) {
+    this.ui.stage = null
+    this.ui.planner = null
+    this.ui.games = null
+    this.ui.thread = null
+    this.selectGroup(gid)
+    this.ui.docs = { gid, id }
+    this.emit()
+  }
+
+  // Who has a document open (live, not stored): 'doc' ephemeral messages, refreshed every few
+  // seconds while open
+  setDocPresence (gid, from, d) {
+    if (!this.docPeers) this.docPeers = new Map()
+    const k = gid + '/' + str(d.id, 32)
+    if (!this.docPeers.has(k)) this.docPeers.set(k, new Map())
+    const m = this.docPeers.get(k)
+    if (d.here) m.set(from, { t: Date.now(), line: Number.isInteger(d.line) ? d.line : null, typing: !!d.typing })
+    else m.delete(from)
+    this.emit()
+  }
+
+  docPresence (gid, id) {
+    const m = this.docPeers?.get(gid + '/' + id)
+    if (!m) return []
+    const now = Date.now()
+    return [...m.entries()].filter(([k, v]) => now - v.t < 15000 && k !== this.me.key).map(([key, v]) => ({ key, ...v }))
+  }
+
   myGameTurns (g) { return this.gamesOf(g).filter(x => this.isMyTurn(x.st)).length }
 
   openGames (gid) {
     this.ui.stage = null
     this.ui.planner = null
+    this.ui.docs = null
     this.selectGroup(gid)
     this.ui.games = { gid, id: null }
     this.ui.thread = null
@@ -1048,6 +1125,7 @@ export class Model {
   openGame (gid, id) {
     this.ui.stage = null
     this.ui.planner = null
+    this.ui.docs = null
     this.selectGroup(gid)
     this.ui.games = { gid, id }
     this.ui.thread = { gid, id } // the game's chat is the thread of its card
@@ -1230,6 +1308,7 @@ export class Model {
     if (this.ui.gid !== gid) this.ui.thread = null
     if (this.ui.planner && this.ui.planner.gid !== gid) this.ui.planner = null
     if (this.ui.games && this.ui.games.gid !== gid) this.ui.games = null
+    if (this.ui.docs && this.ui.docs.gid !== gid) this.ui.docs = null
     this.ui.gid = gid
     this.ui.replyTo = null
     this.ui.editing = null
@@ -1241,6 +1320,7 @@ export class Model {
     if (this.ui.chByGroup[gid] !== chId || this.ui.games) this.ui.thread = null
     this.ui.planner = null
     this.ui.games = null
+    this.ui.docs = null
     this.ui.chByGroup[gid] = chId
     this.ui.replyTo = null
     this.ui.editing = null

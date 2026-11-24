@@ -127,6 +127,7 @@ function GroupMenu ({ g, onClose }) {
       ${item('calendar', 'Calendar', () => model.openPlanner(g.id, 'calendar'))}
       ${item('tasks', 'Tasks', () => model.openPlanner(g.id, 'tasks'))}
       ${item('chess', 'Play chess', () => model.openModal('newGame', { gid: g.id }))}
+      ${item('focus', 'Focus docs', () => model.openDocs(g.id))}
       ${item('hash', 'Create text channel', () => model.openModal('channel', { gid: g.id, kind: 'text' }))}
       ${item('speaker', 'Create voice channel', () => model.openModal('channel', { gid: g.id, kind: 'voice' }))}
       ${item('folderPlus', 'Create folder', () => model.openModal('folder', { gid: g.id }))}
@@ -139,6 +140,9 @@ function GroupMenu ({ g, onClose }) {
 }
 
 // ---------------------------------------------------------------- sidebar
+
+// Documents someone else has open right now
+const docsLive = (g) => model.docsOf(g).filter(d => model.docPresence(g.id, d.id).length > 0).length
 
 export function Sidebar ({ g, ch, stage, footer }) {
   const [menu, setMenu] = useState(false)
@@ -170,6 +174,10 @@ export function Sidebar ({ g, ch, stage, footer }) {
         <button class="channel planner-link games-link ${games ? 'active' : ''}" onClick=${() => model.openGames(g.id)}>
           <${Icon} name="chess" size=${18} class="dim" /><span class="ch-name">Games</span>
           ${turns > 0 && html`<span class="soft-badge" title="Games waiting for you">${turns} your move</span>`}
+        </button>
+        <button class="channel planner-link docs-link ${model.ui.docs?.gid === g.id ? 'active' : ''}" onClick=${() => model.openDocs(g.id)}>
+          <${Icon} name="focus" size=${18} class="dim" /><span class="ch-name">Focus docs</span>
+          ${docsLive(g) > 0 && html`<span class="soft-badge" title="Documents someone is writing in right now">${docsLive(g)} live</span>`}
         </button>
         <${SectionHead} g=${g} kind="text" label="Text channels" />
         ${tree.text.map(c => html`<${TextRow} key=${c.id} view=${view} c=${c} />`)}

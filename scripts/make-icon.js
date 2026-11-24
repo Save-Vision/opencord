@@ -1,39 +1,55 @@
 'use strict'
-// Renders build/icon.png (512×512): three overlapping circles — you and your two friends.
-// Pure Node, no dependencies. Run: node scripts/make-icon.js
+// Renders build/icon.png (512×512): a speech bubble with three connected dots inside, you
+// and your friends talking directly to each other. The same drawing as the in-app logo
+// (src/renderer/lib/logo.js), on a 64-unit grid. Pure Node, no dependencies.
+// Run: node scripts/make-icon.js
 const fs = require('fs')
 const path = require('path')
 const zlib = require('zlib')
 
 const S = 512
 const SS = 4 // supersampling per axis
-const bg = [14, 15, 18]
-const circles = [
-  { x: 168, y: 284, r: 112, c: [45, 212, 191] },
-  { x: 344, y: 284, r: 112, c: [251, 191, 36] },
-  { x: 256, y: 212, r: 112, c: [244, 114, 182] }
-]
-const ring = 16 // dark gap between circles
+const U = S / 64 // pixels per logo unit
+const A = [52, 211, 192] // gradient start (top left)
+const B = [91, 108, 240] // gradient end (bottom right)
+const INK = [255, 255, 255]
+const NODES = [[32, 21.5], [23.5, 36], [40.5, 36]]
+
+const mix = (t) => A.map((v, i) => v + (B[i] - v) * Math.min(1, Math.max(0, t)))
+const grad = (x, y) => mix((x + y) / 128)
 
 function inRoundedSquare (x, y) {
-  const m = 16
-  const rad = 112
-  const lo = m + rad
-  const hi = S - m - rad
-  const cx = Math.min(Math.max(x, lo), hi)
-  const cy = Math.min(Math.max(y, lo), hi)
+  const rad = 17
+  const cx = Math.min(Math.max(x, 2 + rad), 62 - rad)
+  const cy = Math.min(Math.max(y, 2 + rad), 62 - rad)
   return (x - cx) ** 2 + (y - cy) ** 2 <= rad * rad
 }
 
-function sample (x, y) {
+function inTriangle (p, a, b, c) {
+  const s = (p1, p2, p3) => (p1[0] - p3[0]) * (p2[1] - p3[1]) - (p2[0] - p3[0]) * (p1[1] - p3[1])
+  const d1 = s(p, a, b); const d2 = s(p, b, c); const d3 = s(p, c, a)
+  return !((d1 < 0 || d2 < 0 || d3 < 0) && (d1 > 0 || d2 > 0 || d3 > 0))
+}
+
+// the bubble: an ellipse and its tail at the bottom left
+function inBubble (x, y) {
+  if (((x - 32) / 20.5) ** 2 + ((y - 30.3) / 17.8) ** 2 <= 1) return true
+  return inTriangle([x, y], [19.5, 41], [16.6, 52], [28, 46.5])
+}
+
+function distToSegment (x, y, a, b) {
+  const dx = b[0] - a[0]; const dy = b[1] - a[1]
+  const t = Math.max(0, Math.min(1, ((x - a[0]) * dx + (y - a[1]) * dy) / (dx * dx + dy * dy)))
+  return Math.hypot(x - a[0] - t * dx, y - a[1] - t * dy)
+}
+
+function sample (px, py) {
+  const x = px / U; const y = py / U
   if (!inRoundedSquare(x, y)) return null
-  // draw back-to-front; later circles get a dark ring that cuts the earlier ones
-  let col = bg
-  for (const c of circles) {
-    const d = Math.hypot(x - c.x, y - c.y)
-    if (d <= c.r + ring) col = d <= c.r ? c.c : bg
-  }
-  return col
+  if (!inBubble(x, y)) return grad(x, y)
+  for (const [nx, ny] of NODES) if (Math.hypot(x - nx, y - ny) <= 4.6) return grad(x, y)
+  for (let i = 0; i < 3; i++) if (distToSegment(x, y, NODES[i], NODES[(i + 1) % 3]) <= 1.5) return grad(x, y)
+  return INK
 }
 
 const raw = Buffer.alloc((S * 4 + 1) * S)

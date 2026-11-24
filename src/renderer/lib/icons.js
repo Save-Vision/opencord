@@ -77,6 +77,10 @@ const ICONS = {
   upload: ['M12 21V9', 'M7 14l5-5 5 5', 'M5 3h14'],
   alert: ['M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z', 'M12 9v4', 'M12 17h.01'],
   folderPlus: ['M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z', 'M12 11v6', 'M9 14h6'],
+  doc: ['M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z', 'M14 2v6h6', 'M8 13h8', 'M8 17h5'],
+  focus: [[12, 12, 3], 'M3 8V5a2 2 0 0 1 2-2h3', 'M16 3h3a2 2 0 0 1 2 2v3', 'M21 16v3a2 2 0 0 1-2 2h-3', 'M8 21H5a2 2 0 0 1-2-2v-3'],
+  sun: [[12, 12, 4], 'M12 2v2', 'M12 20v2', 'M4.9 4.9l1.4 1.4', 'M17.7 17.7l1.4 1.4', 'M2 12h2', 'M20 12h2', 'M4.9 19.1l1.4-1.4', 'M17.7 6.3l1.4-1.4'],
+  monitor: ['M3 4h18v12H3z', 'M8 20h8', 'M12 16v4'],
   ticket: ['M3 7a2 2 0 0 0 2-2h14a2 2 0 0 0 2 2v3a2 2 0 0 0 0 4v3a2 2 0 0 0-2 2H5a2 2 0 0 0-2-2v-3a2 2 0 0 0 0-4z', 'M13 5v2', 'M13 11v2', 'M13 17v2']
 }
 
@@ -84,20 +88,22 @@ const ICONS = {
 //   line  2 px strokes in the text colour (Standard)
 //   thin  1.6 px hairlines, like system symbols (Glass)
 //   neon  bold strokes with a soft glow (OLED; the glow is CSS, see themes.css)
+//   quiet 1.5 px, a little faded (Minimal)
 //   xp    glossy colour icons: a dark outline under a top-lit gradient, colour per meaning
 let style = 'line'
 export function setIconStyle (s) { style = s || 'line' }
 export const iconStyle = () => style
 
-const STROKE = { line: 2, thin: 1.6, neon: 2.3 }
+const STROKE = { line: 2, thin: 1.6, neon: 2.3, quiet: 1.5 }
 
 // XP colours: what the icon is about decides its colour, like the old Windows icon sets did
 const XP_HUE = {
   green: ['mic', 'phone', 'check', 'play', 'speaker', 'headphones', 'camera', 'music', 'shield', 'shieldPlain', 'plus', 'userPlus', 'signal', 'download'],
   yellow: ['folder', 'folderPlus', 'crown', 'zap', 'smile', 'lock', 'ticket', 'archive', 'clip', 'poll', 'cards', 'pin', 'inbox'],
   red: ['micOff', 'headphonesOff', 'cameraOff', 'volumeX', 'x', 'trash', 'leave', 'userX', 'stop', 'alert', 'flag', 'calendar'],
-  gray: ['settings', 'edit', 'pencilLine', 'chess', 'clock', 'more', 'chevronDown', 'chevronRight', 'chevronLeft', 'flip', 'code'],
-  purple: ['moon', 'sparkle', 'at']
+  gray: ['settings', 'edit', 'doc', 'focus', 'monitor', 'pencilLine', 'chess', 'clock', 'more', 'chevronDown', 'chevronRight', 'chevronLeft', 'flip', 'code'],
+  purple: ['moon', 'sparkle', 'at'],
+  sun: ['sun']
 }
 const HUE_OF = {}
 for (const [hue, names] of Object.entries(XP_HUE)) for (const n of names) HUE_OF[n] = hue
@@ -108,7 +114,8 @@ const XP_COLORS = {
   yellow: ['#ffe58a', '#e09a12', '#6b4300'],
   red: ['#ffb0a0', '#d8321c', '#6a0f05'],
   gray: ['#f2f2ee', '#8a8d93', '#34373d'],
-  purple: ['#e2c2ff', '#7a3fd0', '#33115e']
+  purple: ['#e2c2ff', '#7a3fd0', '#33115e'],
+  sun: ['#fff1a0', '#f0a018', '#7a4a00']
 }
 
 // The gradients live once in the page; every XP icon points at them

@@ -633,16 +633,184 @@ test('layout: widths snap to the nearby sizes and stay within limits', () => {
   assert.strictEqual(layout.dragWidth(['side', 'rail', 'nav', 'main'], 'side', 240, 300, 360), 300)
 })
 
-test('themes: four themes, unknown ones become Standard, and the page gets the theme', () => {
-  assert.deepStrictEqual(themes.THEME_IDS, ['standard', 'xp', 'glass', 'oled'])
+test('themes: five themes, unknown ones become Standard, and the page gets the theme', () => {
+  assert.deepStrictEqual(themes.THEME_IDS, ['standard', 'minimal', 'xp', 'glass', 'oled'])
   assert.strictEqual(themes.normalizeTheme('glass'), 'glass')
   assert.strictEqual(themes.normalizeTheme('dracula'), 'standard')
   assert.strictEqual(themes.normalizeTheme(undefined), 'standard')
-  for (const t of themes.THEMES) assert.ok(t.name && t.hint && t.icons, t.id)
-  assert.strictEqual(new Set(themes.THEMES.map(t => t.icons)).size, 4, 'each theme draws its own icons')
+  for (const t of themes.THEMES) assert.ok(t.name && t.hint && t.icons && ['light', 'dark'].includes(t.mode), t.id)
+  assert.strictEqual(new Set(themes.THEMES.map(t => t.icons)).size, 5, 'each theme draws its own icons')
   const doc = { documentElement: { dataset: {} } }
-  assert.strictEqual(themes.applyTheme({ theme: 'oled' }, doc), 'oled')
-  assert.deepStrictEqual(doc.documentElement.dataset, { theme: 'oled', anim: 'on' })
-  themes.applyTheme({ theme: 'nope', animatedBg: false }, doc)
-  assert.deepStrictEqual(doc.documentElement.dataset, { theme: 'standard', anim: 'off' })
+  assert.strictEqual(themes.applyTheme({ theme: 'oled' }, doc, true), 'oled')
+  assert.deepStrictEqual(doc.documentElement.dataset, { theme: 'oled', mode: 'dark', anim: 'on' })
+  themes.applyTheme({ theme: 'nope', animatedBg: false }, doc, true)
+  assert.deepStrictEqual(doc.documentElement.dataset, { theme: 'standard', mode: 'dark', anim: 'off' })
+})
+
+test('themes: every theme has a light and a dark mode; "system" follows the OS', () => {
+  // no choice: the theme's own mode
+  assert.strictEqual(themes.resolveMode({ theme: 'xp' }), 'light')
+  assert.strictEqual(themes.resolveMode({ theme: 'oled' }), 'dark')
+  assert.strictEqual(themes.resolveMode({ theme: 'minimal', mode: null }), 'light')
+  // a choice wins for every theme
+  for (const id of themes.THEME_IDS) {
+    assert.strictEqual(themes.resolveMode({ theme: id, mode: 'light' }), 'light')
+    assert.strictEqual(themes.resolveMode({ theme: id, mode: 'dark' }), 'dark')
+    assert.strictEqual(themes.resolveMode({ theme: id, mode: 'system' }, true), 'dark')
+    assert.strictEqual(themes.resolveMode({ theme: id, mode: 'system' }, false), 'light')
+  }
+  assert.strictEqual(themes.resolveMode({ theme: 'glass', mode: 'sepia' }), 'light') // junk: theme's own
+})
+
+test('themes.css: every theme defines its colours in both modes', async () => {
+  const fs = await import('fs')
+  const css = fs.readFileSync(new URL('../src/renderer/themes.css', import.meta.url), 'utf8')
+  for (const id of themes.THEME_IDS) {
+    for (const mode of ['light', 'dark']) {
+      const m = new RegExp(`html\\[data-theme=${id}\\]\\[data-mode=${mode}\\] \\{([^}]*)\\}`).exec(css)
+      assert.ok(m, `${id} ${mode} block`)
+      // the theme's shared block can set the panels for both modes (XP points them at its own colours)
+      const both = (new RegExp(`html\\[data-theme=${id}\\] \\{([^}]*)\\}`).exec(css)?.[1] || '') + m[1]
+      // standard dark keeps styles.css's base colours and only sets the panels
+      const need = id === 'standard' && mode === 'dark' ? ['--app-bg', '--main-bg'] : ['--bg-0', '--text-0', '--accent', '--app-bg', '--main-bg']
+      for (const v of need) assert.ok(both.includes(v + ':'), `${id} ${mode} sets ${v}`)
+    }
+  }
+  // light modes stay easy on the eyes: no pure white surfaces, no pure black text
+  for (const block of css.match(/\[data-mode=light\] \{[^}]*\}/g)) {
+    assert.ok(!/--(bg-[0-4]|main-bg|app-bg): #fff(fff)?;/i.test(block), 'no pure white surfaces: ' + block.slice(0, 60))
+    assert.ok(!/--text-0: #000(000)?;/i.test(block), 'no pure black text')
+  }
+  // OLED is no longer pink
+  assert.ok(!/ff2bd6/i.test(css), 'OLED accent changed')
+  // Minimal: no borders, no shadows
+  const minimal = /html\[data-theme=minimal\] \{([^}]*)\}/.exec(css)[1]
+  assert.match(minimal, /--panel-border: 0;/)
+  assert.match(minimal, /--panel-shadow: none;/)
+})
+
+// ---- 0.6.2: shared focus documents ----
+const crdt = await import('../src/renderer/lib/textcrdt.js')
+
+// Applies ops to a fresh document in the given order
+const replay = (ops) => { const d = new crdt.TextDoc(); for (const [a, data] of ops) d.applyOp(a, data); return d }
+const shuffle = (arr, seed) => {
+  const a = [...arr]
+  let x = seed
+  for (let i = a.length - 1; i > 0; i--) { x = (x * 1103515245 + 12345) % 2147483648; const j = x % (i + 1); [a[i], a[j]] = [a[j], a[i]] }
+  return a
+}
+
+test('focus docs: typing, deleting and replacing make the right ops', () => {
+  const d = new crdt.TextDoc()
+  const e1 = d.localReplace('hello world', A)
+  assert.strictEqual(d.text(), 'hello world')
+  assert.deepStrictEqual(e1.x, [])
+  assert.deepStrictEqual(e1.r, [[1, 0, '', 'hello world']])
+  const e2 = d.localReplace('hello brave world', A) // typed in the middle
+  assert.deepStrictEqual(e2.r, [[12, 6, A, 'brave ']])
+  const e3 = d.localReplace('hello world', A) // and deleted again
+  assert.deepStrictEqual(e3.x, [[12, A, 6]])
+  assert.strictEqual(d.text(), 'hello world')
+  assert.strictEqual(d.localReplace('hello world', A), null)
+  // someone else replaying our ops gets the same text
+  assert.strictEqual(replay([[A, e1], [A, e2], [A, e3]]).text(), 'hello world')
+})
+
+test('focus docs: two people typing at once end up with the same text, in any order', () => {
+  const base = new crdt.TextDoc()
+  const e0 = base.localReplace('The plan:\n', A)
+  // Alice and Bob both start from the same text and type at the same time
+  const alice = replay([[A, e0]])
+  const bob = replay([[A, e0]])
+  const ea = alice.localReplace('The plan:\n- pizza\n', A)
+  const eb = bob.localReplace('The plan:\n- games\n', B)
+  const ea2 = alice.localReplace('Our plan:\n- pizza\n', A)
+  const eb2 = bob.localReplace('The plan:\n- games all night\n', B)
+  const ops = [[A, e0], [A, ea], [B, eb], [A, ea2], [B, eb2]]
+  const want = replay(ops).text()
+  assert.ok(want.includes('- pizza\n') && want.includes('- games all night\n') && want.startsWith('Our plan:'), want)
+  // each author's ops in their order, interleaved in every possible way
+  const aOps = [[A, ea], [A, ea2]]
+  const bOps = [[B, eb], [B, eb2]]
+  for (let mask = 0; mask < 16; mask++) {
+    const merged = [[A, e0]]
+    let i = 0
+    let j = 0
+    for (let k = 0; k < 4; k++) {
+      if (j >= 2 || (i < 2 && (mask >> k) & 1)) merged.push(aOps[i++])
+      else merged.push(bOps[j++])
+    }
+    assert.strictEqual(replay(merged).text(), want, 'mask ' + mask)
+  }
+  // and fully out of order too: an insert waits for the text it was typed after
+  for (let seed = 1; seed < 40; seed++) assert.strictEqual(replay(shuffle(ops, seed)).text(), want, 'shuffled ' + seed)
+})
+
+test('focus docs: the same spot at the same time is ordered the same everywhere', () => {
+  const ea = new crdt.TextDoc().localReplace('AAA', A)
+  const eb = new crdt.TextDoc().localReplace('BBB', B)
+  const x = replay([[A, ea], [B, eb]]).text()
+  assert.strictEqual(x, replay([[B, eb], [A, ea]]).text())
+  assert.ok(x === 'AAABBB' || x === 'BBBAAA')
+})
+
+test('focus docs: deleting text that has not arrived yet still deletes it', () => {
+  const d = new crdt.TextDoc()
+  const ins = d.localReplace('secret', A)
+  const del = d.localReplace('', A)
+  assert.strictEqual(replay([[A, del], [A, ins]]).text(), '')
+})
+
+test('focus docs: the caret stays next to the same characters when a friend types', () => {
+  const mine = new crdt.TextDoc()
+  const e0 = mine.localReplace('hello world', A)
+  const theirs = replay([[A, e0]])
+  const before = mine.visible().slice()
+  const eb = theirs.localReplace('oh, hello world', B) // friend types at the start
+  mine.applyOp(B, eb)
+  assert.strictEqual(mine.text(), 'oh, hello world')
+  assert.strictEqual(crdt.mapCaret(before, mine, 5), 9) // was after "hello", still is
+})
+
+test('focus docs: big pastes are split into runs and ops that fit', () => {
+  const d = new crdt.TextDoc()
+  const big = 'x'.repeat(50000) + '\n' + 'y'.repeat(30000)
+  const ed = d.localReplace(big, A)
+  assert.ok(ed.r.every(r => r[3].length <= crdt.MAX_RUN))
+  const parts = crdt.chunkEdit(ed)
+  assert.ok(parts.length > 1)
+  for (const p of parts) assert.ok(JSON.stringify({ id: 'x'.repeat(16), ...p }).length < 60000)
+  const other = new crdt.TextDoc()
+  for (const p of shuffle(parts, 7)) other.applyOp(A, p)
+  assert.strictEqual(other.text(), big)
+  // junk in ops is ignored
+  other.applyOp(B, { r: [['x'], [1, 0, '', 5], null], x: [[1, B, -1], 'no'] })
+  assert.strictEqual(other.text(), big)
+})
+
+test('focus docs: the model keeps documents, names, and who may delete them', () => {
+  const m = new Model()
+  m.me = { key: A }
+  m.addGroup({ id: 'g1', name: 'Squad', ops: [] })
+  const g = m.groups.get('g1')
+  let s = 0
+  const op = (a, k, d, t) => ({ g: 'g1', a, s: ++s, t, k, d, sig: '' })
+  const ed = new crdt.TextDoc().localReplace('# Notes\nhello', A)
+  m.applyOps('g1', [op(A, 'group.init', { name: 'Squad' }, 1), op(A, 'doc.set', { id: 'd1', name: 'Notes' }, 2), op(A, 'doc.edit', { id: 'd1', ...ed }, 3), op(B, 'doc.set', { id: 'd1', name: 'Our notes' }, 4)])
+  const doc = g.docs.get('d1')
+  assert.strictEqual(doc.name, 'Our notes')
+  assert.strictEqual(doc.text.text(), '# Notes\nhello')
+  assert.strictEqual(doc.createdBy, A)
+  assert.deepStrictEqual(m.docsOf(g).map(x => x.id), ['d1'])
+  // Bob isn't the creator or an admin: his delete doesn't count
+  m.applyOps('g1', [op(B, 'doc.delete', { id: 'd1' }, 5)])
+  assert.strictEqual(m.docsOf(g).length, 1)
+  m.applyOps('g1', [op(A, 'doc.delete', { id: 'd1' }, 6)])
+  assert.strictEqual(m.docsOf(g).length, 0)
+  // who has it open comes and goes
+  m.setDocPresence('g1', B, { id: 'd1', here: true, line: 3, typing: true })
+  assert.deepStrictEqual(m.docPresence('g1', 'd1').map(p => [p.key, p.line, p.typing]), [[B, 3, true]])
+  m.setDocPresence('g1', B, { id: 'd1', here: false })
+  assert.deepStrictEqual(m.docPresence('g1', 'd1'), [])
 })

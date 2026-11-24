@@ -1,7 +1,7 @@
 'use strict'
 const {
   app, BrowserWindow, ipcMain, protocol, session, desktopCapturer, shell, dialog,
-  Tray, Menu, nativeImage, clipboard, globalShortcut, safeStorage, powerMonitor
+  Tray, Menu, nativeImage, clipboard, globalShortcut, safeStorage, powerMonitor, nativeTheme
 } = require('electron')
 const path = require('path')
 const fs = require('fs')
@@ -155,6 +155,7 @@ async function boot () {
   registerIpc()
   wireNetwork()
   createWindow()
+  nativeTheme.on('updated', () => { if (store.settings.mode === 'system') applyChrome() })
   createTray()
   registerLinkHandler()
   updater.start()
@@ -212,15 +213,29 @@ function setVoiceHotkeys (on) {
   }
 }
 
-// Window colours per theme (renderer/lib/themes.js): the background shown while the page
-// loads and the caption buttons Windows draws over the right end of our title bar.
+// Window colours per theme and mode (renderer/lib/themes.js): the background shown while the
+// page loads and the caption buttons Windows draws over the right end of our title bar.
 const THEME_CHROME = {
-  standard: { bg: '#0b0c0f', bar: '#0b0c0f', symbol: '#9aa0aa' },
-  xp: { bg: '#3a6ea5', bar: '#0d4fd0', symbol: '#ffffff' },
-  glass: { bg: '#dfe7f3', bar: '#e7edf6', symbol: '#1d1d1f' },
-  oled: { bg: '#000000', bar: '#000000', symbol: '#f5f5f5' }
+  'standard-dark': { bg: '#08090b', bar: '#08090b', symbol: '#9aa0aa' },
+  'standard-light': { bg: '#d4d8de', bar: '#d4d8de', symbol: '#3a3f47' },
+  'minimal-dark': { bg: '#121212', bar: '#121212', symbol: '#9a9a96' },
+  'minimal-light': { bg: '#e8e7e3', bar: '#e8e7e3', symbol: '#4a4a46' },
+  'xp-light': { bg: '#3a6ea5', bar: '#0d4fd0', symbol: '#ffffff' },
+  'xp-dark': { bg: '#1c2638', bar: '#2f3b56', symbol: '#e8ebf2' },
+  'glass-light': { bg: '#d5dceb', bar: '#dde3ef', symbol: '#2a2d33' },
+  'glass-dark': { bg: '#10131a', bar: '#141820', symbol: '#d6d9df' },
+  'oled-dark': { bg: '#000000', bar: '#000000', symbol: '#e6e6e6' },
+  'oled-light': { bg: '#d9d9d5', bar: '#d9d9d5', symbol: '#262626' }
 }
-const chrome = () => THEME_CHROME[store?.settings?.theme] || THEME_CHROME.standard
+// The theme's own mode when the user didn't pick one
+const THEME_MODE = { standard: 'dark', minimal: 'light', xp: 'light', glass: 'light', oled: 'dark' }
+function themeMode () {
+  const s = store?.settings || {}
+  if (s.mode === 'light' || s.mode === 'dark') return s.mode
+  if (s.mode === 'system') return nativeTheme.shouldUseDarkColors ? 'dark' : 'light'
+  return THEME_MODE[s.theme] || 'dark'
+}
+const chrome = () => THEME_CHROME[(THEME_MODE[store?.settings?.theme] ? store.settings.theme : 'standard') + '-' + themeMode()]
 
 function applyChrome () {
   if (!win) return
@@ -518,7 +533,7 @@ function registerIpc () {
 
   handle('settings:set', (patch) => {
     const s = store.setSettings(patch)
-    if (patch && 'theme' in patch) applyChrome()
+    if (patch && ('theme' in patch || 'mode' in patch)) applyChrome()
     return s
   })
 

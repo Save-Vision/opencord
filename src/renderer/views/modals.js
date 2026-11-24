@@ -18,7 +18,7 @@ import { PollModal } from './polls.js'
 import { AddSoundModal } from './soundboard.js'
 import { BackupModal, RestoreModal, AccountSettings } from './account.js'
 import { folderOptions, folderFits } from './sidebar.js'
-import { THEMES, normalizeTheme } from '../lib/themes.js'
+import { THEMES, normalizeTheme, themeInfo } from '../lib/themes.js'
 import { normalizeLayout, sameOrder, DEFAULT_ORDER } from '../lib/layout.js'
 import { BLOCK_LABEL, resetLayout } from './dock.js'
 
@@ -699,27 +699,35 @@ function ProfileSettings () {
 }
 
 // A tiny drawing of the window in each theme: rail, channels, chat and side panel
-function ThemePreview ({ id }) {
+function ThemePreview ({ id, mode }) {
   return html`
-    <div class="theme-preview" data-preview=${id} aria-hidden="true">
-      <div class="tp-bar" />
-      <div class="tp-body">
-        <i class="tp-rail" /><i class="tp-nav"><b /><b /><b /></i>
-        <i class="tp-main"><b /><b class="short" /><b /><u /></i><i class="tp-side" />
+    <div class="theme-preview" data-preview=${id} data-pmode=${mode} aria-hidden="true">
+      <div class="thp-bar" />
+      <div class="thp-body">
+        <i class="thp-rail" /><i class="thp-nav"><b /><b /><b /></i>
+        <i class="thp-main"><b /><b class="short" /><b /><u /></i><i class="thp-side" />
       </div>
     </div>`
 }
 
 function AppearanceSettings () {
   const cur = normalizeTheme(model.settings.theme)
+  const mode = document.documentElement.dataset.mode || 'dark'
+  const picked = model.settings.mode || null
   const layout = normalizeLayout(model.settings.layout)
   const custom = !sameOrder(layout.order, DEFAULT_ORDER) || Object.keys(layout.w).length > 0
   return html`
+    <h4>Mode</h4>
+    <div class="seg" role="group" aria-label="Light or dark">
+      ${[['light', 'Light', 'sun'], ['dark', 'Dark', 'moon'], ['system', 'Like Windows', 'monitor']].map(([m, label, icon]) => html`
+        <button key=${m} data-mode-id=${m} class=${(picked ? picked === m : mode === m) ? 'active' : ''} aria-pressed=${picked === m} onClick=${() => saveSettings({ mode: m })}><${Icon} name=${icon} size=${15} />${m === 'system' && model.platform === 'darwin' ? 'Like macOS' : label}</button>`)}
+    </div>
+    <p class="hint">${picked ? 'Every theme has a light and a dark version.' : `Every theme has a light and a dark version; ${themeInfo(cur).name} starts out ${themeInfo(cur).mode}.`}</p>
     <h4>Theme</h4>
     <div class="theme-grid">
       ${THEMES.map(t => html`
         <button key=${t.id} class="theme-card ${cur === t.id ? 'active' : ''}" data-theme-id=${t.id} aria-pressed=${cur === t.id} onClick=${() => saveSettings({ theme: t.id })}>
-          <${ThemePreview} id=${t.id} />
+          <${ThemePreview} id=${t.id} mode=${mode} />
           <span class="theme-name">${t.name}${cur === t.id && html`<${Icon} name="check" size=${14} />`}</span>
           <small>${t.hint}</small>
         </button>`)}

@@ -33,7 +33,8 @@ directly between your computers, encrypted end to end.
 | Webcam | ✅ | ✅ |
 | Moderation: kick, admins, mute for everyone, move between channels | ✅ | ✅ |
 | Profile and group pictures | ✅ synced, visible offline | ✅ |
-| Themes | ✅ Standard, XP Classic, Glass (animated), OLED; each with its own fonts, icons and corners | dark / light |
+| Themes | ✅ Standard, Minimal, XP Classic, Glass (animated), OLED, each light or dark, with its own fonts, icons and corners | dark / light |
+| Write together | ✅ focus documents: one Markdown text everyone types in at once, full screen, nothing else on it | ❌ |
 | Layout | ✅ floating panels you drag into any order and resize (they snap), like VS Code | fixed |
 | Updates | ✅ automatic, from this repo's GitHub releases | ✅ |
 | Where your data lives | only on your three PCs | Discord's servers |
@@ -114,10 +115,18 @@ Tips:
 - Settings → **Storage** shows what takes up space, removes files friends sent (they can be
   downloaded again), and moves your data (identity, history, files) to another folder or drive.
 - Settings → Privacy → **Link previews** turns off fetching previews for links you send.
-- Settings → **Appearance** picks a **theme**: *Standard* (dark), *XP Classic* (blue title bars,
-  beige windows, bevelled buttons and colourful icons), *Glass* (light, see-through panels over a
-  slowly moving background; it pauses when the window is in the background and can be switched
-  off) or *OLED* (true black with neon colours). Each theme has its own fonts, icons and corners.
+- Settings → **Appearance** picks a **theme** and whether it's **light, dark or like Windows**:
+  *Standard*, *Minimal* (no borders, no shadows, nothing but the content), *XP Classic* (blue
+  title bars, bevelled buttons and colourful icons), *Glass* (see-through panels over a slowly
+  moving background; it pauses when the window is in the background and can be switched off) or
+  *OLED* (true black with bright colours in dark mode). Each has its own fonts, icons and corners;
+  the light versions use soft paper tones instead of bright white.
+- **Focus docs** (in every group's channel list, and in the header of a private chat) are shared
+  documents. Open one and the whole window becomes a quiet writing page: no panels, no bars, and
+  even the little toolbar fades while you type. Everyone who opens it types in the same text at
+  the same time and sees who else is there. *Split* or *Preview* (`Ctrl+E`) shows the Markdown
+  rendered; you can open a `.md` file as a new document and save any document as one. `Esc`
+  leaves.
 - The window is made of **floating panels** (groups, channels, chat, side panel). Drag the small
   grip above a panel onto the left or right half of another one to move it there; drag the edge of
   the channel list or side panel to resize it (it snaps to a few widths, double-click for the
@@ -226,6 +235,12 @@ Tips:
   enough to pretend to be you. A backup is encrypted with your password (scrypt + AES-256-GCM).
   After a restore, your groups stay read-only until a friend has sent you everything you'd
   written since the backup, so your app never reuses a message number your friends already have.
+- **Focus documents** are ops too: `doc.set` (name), `doc.delete`, and `doc.edit`, which carries
+  what someone typed or deleted. Every character has an id (a counter and its author), and text
+  typed after a character is placed by a fixed rule (an RGA sequence CRDT), so every app ends up
+  with the same text whatever order the edits arrive in. Typing is bundled into one op a moment
+  after you stop (at most about a second later), so a document doesn't turn into thousands of
+  ops. Who has a document open is sent live and never stored.
 - **Versions:** apps tell each other which protocol versions they understand. If a friend's app
   is too old to sync with yours, nothing half-syncs: the newer app shows who needs to update, and
   the older one shows a full-screen *Time to update* with an install button.

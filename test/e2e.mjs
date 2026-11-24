@@ -7,7 +7,9 @@
 // forged voice messages can't open a call. Since 0.6: search, profile cards, polls, status,
 // Claude's privacy (it only reads the asker) and replies to Claude, the soundboard, a poker hand,
 // a call over the fallback path, the update-required screen, and restoring a backup. Since 0.6.1:
-// the four themes, moving and resizing the floating panels; Bob uses the XP theme from then on.
+// the themes, moving and resizing the floating panels. Since 0.6.2: light and dark modes, the
+// Minimal theme, and two people writing in one focus document at once; Bob uses Glass (light)
+// from then on.
 // Screenshots land in test/screenshots/.
 // Run: npm run test:e2e
 import { _electron as electron } from 'playwright-core'
@@ -276,9 +278,10 @@ try {
   await alice.getByRole('button', { name: 'Voice & audio', exact: true }).click()
   console.log('   noise suppression:', await alice.locator('.settings-body select:has(option[value="ai"])').inputValue())
 
-  step('themes: each one changes the whole window and is saved')
+  step('themes: each one changes the whole window and is saved, in light and dark')
   await alice.getByRole('button', { name: 'Appearance', exact: true }).click()
-  for (const [i, t] of ['xp', 'glass', 'oled', 'standard'].entries()) {
+  const mode = (page) => page.evaluate(() => document.documentElement.dataset.mode)
+  for (const [i, t] of ['minimal', 'xp', 'glass', 'oled', 'standard'].entries()) {
     await alice.locator(`.theme-card[data-theme-id="${t}"]`).click()
     await alice.locator(`html[data-theme="${t}"]`).waitFor({ state: 'attached', timeout: 5000 })
     await alice.locator(`.theme-card.active[data-theme-id="${t}"]`).waitFor()
@@ -287,7 +290,7 @@ try {
       font: getComputedStyle(document.body).fontFamily.split(',')[0],
       icon: document.querySelector('.user-panel svg.icon')?.getAttribute('class')
     }))
-    console.log(`   ${t}: font ${look.font}, ${look.icon}`)
+    console.log(`   ${t} (${await mode(alice)}): font ${look.font}, ${look.icon}`)
     if (t === 'glass' && !(await alice.locator('.toggle-row', { hasText: 'Moving background' }).isVisible())) throw new Error('Glass should offer the moving background switch')
     if (t !== 'standard') {
       await alice.keyboard.press('Escape')
@@ -297,12 +300,27 @@ try {
       await alice.getByRole('button', { name: 'Appearance', exact: true }).click()
     }
   }
+  // every theme has a light and a dark mode
+  for (const [t, m] of [['oled', 'light'], ['xp', 'dark'], ['standard', 'light'], ['standard', 'dark']]) {
+    await alice.locator(`.theme-card[data-theme-id="${t}"]`).click()
+    await alice.locator(`.seg button[data-mode-id="${m}"]`).click()
+    await alice.locator(`html[data-theme="${t}"][data-mode="${m}"]`).waitFor({ state: 'attached', timeout: 5000 })
+    if (await alice.evaluate(() => window.__od.model.settings.mode) !== m) throw new Error('mode not saved: ' + m)
+    if (t !== 'standard' || m !== 'dark') {
+      await alice.keyboard.press('Escape')
+      await settle(alice)
+      await shot(alice, `55-theme-${t}-${m}`)
+      await alice.locator('.user-panel button[title="Settings"]').click()
+      await alice.getByRole('button', { name: 'Appearance', exact: true }).click()
+    }
+  }
   await alice.keyboard.press('Escape')
-  // Bob keeps the XP look for the rest of the run, so every later step also runs in it
+  // Bob keeps Glass in light mode for the rest of the run, so calls and everything else are
+  // also checked in a light theme
   await bob.locator('.user-panel button[title="Settings"]').click()
   await bob.getByRole('button', { name: 'Appearance', exact: true }).click()
-  await bob.locator('.theme-card[data-theme-id="xp"]').click()
-  await bob.locator('html[data-theme="xp"]').waitFor({ state: 'attached' })
+  await bob.locator('.theme-card[data-theme-id="glass"]').click()
+  await bob.locator('html[data-theme="glass"][data-mode="light"]').waitFor({ state: 'attached' })
   await bob.keyboard.press('Escape')
 
   step('panels: drag the side panel next to the channels, resize, cancel, reset')
@@ -352,6 +370,57 @@ try {
   await alice.getByRole('button', { name: 'Reset panels' }).click()
   await alice.waitForFunction(() => window.__od.model.settings.layout?.order?.join() === 'rail,nav,main,side', null, { timeout: 5000 })
   await alice.keyboard.press('Escape')
+
+  step('focus docs: write in one document together, nothing else on screen')
+  await alice.locator('.docs-link').click()
+  await alice.getByRole('button', { name: 'New document' }).click()
+  await alice.locator('.focus-mode .focus-text').waitFor()
+  if (await alice.locator('.dock-main').isVisible() && await alice.locator('.focus-mode').evaluate(el => el.getBoundingClientRect().width < window.innerWidth)) throw new Error('focus mode should cover the window')
+  await alice.locator('.focus-title').fill('Trip plan')
+  await alice.locator('.focus-title').press('Enter')
+  await alice.locator('.focus-text').click()
+  await alice.keyboard.type('# Trip plan\n\nAlice: we leave on Friday.\n')
+  await bob.locator('.docs-link').click()
+  await bob.locator('.doc-card', { hasText: 'Trip plan' }).click({ timeout: 15000 })
+  const docText = (page) => page.locator('.focus-text').inputValue()
+  await bob.waitForFunction(() => document.querySelector('.focus-text')?.value.includes('we leave on Friday'), null, { timeout: 15000 })
+  // both type at the same time: Alice at the end, Bob at the very start
+  await bob.locator('.focus-text').click()
+  await bob.keyboard.press('Control+Home')
+  await Promise.all([
+    alice.keyboard.type('Alice: I bring the tent.\n', { delay: 25 }),
+    bob.keyboard.type('Bob was here first. ', { delay: 25 })
+  ])
+  const same = async () => {
+    for (let k = 0; k < 60; k++) {
+      const [a, b] = [await docText(alice), await docText(bob)]
+      if (a === b && a.includes('I bring the tent') && a.includes('Bob was here first')) return a
+      await alice.waitForTimeout(250)
+    }
+    throw new Error('the two apps did not end up with the same text:\n' + await docText(alice) + '\n---\n' + await docText(bob))
+  }
+  const merged = await same()
+  if (!merged.startsWith('Bob was here first. # Trip plan') || !merged.endsWith('Alice: I bring the tent.\n')) throw new Error('edits landed in the wrong place: ' + JSON.stringify(merged))
+  // Bob's caret stayed where he was typing while Alice's text came in
+  if (await bob.locator('.focus-text').evaluate(el => el.selectionStart) !== 'Bob was here first. '.length) throw new Error("Bob's caret moved")
+  // each sees the other in the document
+  await alice.locator('.focus-people .avatar').first().waitFor({ timeout: 10000 })
+  await bob.locator('.focus-people .avatar').first().waitFor({ timeout: 10000 })
+  await bob.getByRole('button', { name: 'Split', exact: true }).click()
+  // (Bob's words now start the first line, so "# Trip plan" is no longer a heading)
+  await bob.locator('.focus-preview p', { hasText: 'I bring the tent' }).waitFor({ timeout: 5000 })
+  await alice.mouse.move(400, 300)
+  await settle(alice)
+  await shot(alice, '56-focus-alice')
+  await shot(bob, '57-focus-bob')
+  // Esc leaves focus mode; the document is in the list for both
+  await alice.keyboard.press('Escape')
+  await alice.locator('.doc-card', { hasText: 'Trip plan' }).waitFor()
+  await bob.keyboard.press('Escape')
+  await bob.locator('.doc-card', { hasText: 'Trip plan' }).waitFor()
+  console.log('   doc words:', merged.split(/\s+/).filter(Boolean).length)
+  await openChannel(alice, 'general')
+  await openChannel(bob, 'general')
 
   step('calendar: event with RSVP')
   await alice.locator('.planner-link', { hasText: 'Calendar' }).click()

@@ -87,9 +87,11 @@ const DEFAULT_SETTINGS = {
   },
   // Make previews for links you send (your app fetches the page; friends' apps never do)
   linkPreviews: true,
-  // Look: 'standard', 'xp', 'glass' or 'oled' (renderer/lib/themes.js); the Glass theme's
+  // Look: 'standard', 'minimal', 'xp', 'glass' or 'oled' (renderer/lib/themes.js); the Glass theme's
   // moving background can be switched off
   theme: 'standard',
+  // 'light', 'dark', 'system' (follow the OS) or null (the theme's own)
+  mode: null,
   animatedBg: true,
   // Order and widths of the floating panels (renderer/lib/layout.js); null = default
   layout: null,

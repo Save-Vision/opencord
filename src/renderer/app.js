@@ -19,9 +19,11 @@ import { AccountNote } from './views/account.js'
 import { SoundboardButton, onRemoteSound } from './views/soundboard.js'
 import { announceStatus, setMyStatus, startPresence, STATUS_LABEL } from './lib/presence.js'
 import { startPoker } from './lib/pokerplay.js'
-import { applyTheme, themeInfo } from './lib/themes.js'
+import { applyTheme, themeInfo, watchSystemMode } from './lib/themes.js'
+import { Logo } from './lib/logo.js'
 import { setIconStyle } from './lib/icons.js'
 import { DockLayout } from './views/dock.js'
+import { DocsView, FocusEditor } from './views/focus.js'
 
 // ---------------------------------------------------------------- shell
 
@@ -35,7 +37,10 @@ function App () {
   const stage = model.ui.stage && g && model.ui.stage.gid === g.id ? g.channels.get(model.ui.stage.ch) : null
   const ch = g ? model.currentChannel(g) : null
   const games = !stage && g && model.ui.games?.gid === g.id
-  const planner = !stage && !games && g && model.ui.planner?.gid === g.id
+  const docsUi = !stage && !games && g && model.ui.docs?.gid === g.id ? model.ui.docs : null
+  const focusDoc = docsUi?.id ? g.docs.get(docsUi.id) : null
+  const planner = !stage && !games && !docsUi && g && model.ui.planner?.gid === g.id
+  document.documentElement.classList.toggle('focus-on', !!focusDoc)
   const thread = !stage && !planner && g && model.ui.thread?.gid === g.id
   const search = !stage && !planner && g && model.ui.search?.gid === g.id
   // A board has its chat in the thread next to it; the games list has nothing on the side
@@ -68,6 +73,8 @@ function App () {
               ? html`<${VoiceStage} g=${g} ch=${stage} />`
               : games
                 ? html`<${GamesView} g=${g} />`
+                : docsUi
+                ? html`<${DocsView} g=${g} />`
                 : planner
                 ? html`<${PlannerView} g=${g} />`
                 : ch
@@ -82,6 +89,7 @@ function App () {
     <${Backdrop} />
     <${TitleBar} g=${g} home=${home} />
     <${DockLayout} blocks=${blocks} />
+    ${focusDoc && !model.docDeleted(g, focusDoc) && html`<${FocusEditor} key=${focusDoc.id} g=${g} doc=${focusDoc} />`}
     <${CallBanner} />
     <${MemberMenu} />
     <${Modals} />
@@ -99,7 +107,7 @@ function Backdrop () {
 function TitleBar ({ g, home }) {
   return html`
     <div class="titlebar ${model.platform}">
-      <div class="brand"><span class="logo-dot" />OpenDiscord${model.profile && html`<span class="profile-tag">${model.profile}</span>`}</div>
+      <div class="brand"><${Logo} size=${18} />OpenDiscord${model.profile && html`<span class="profile-tag">${model.profile}</span>`}</div>
       <div class="title-center">${g ? (g.dm ? '@' + model.groupName(g) : model.groupName(g)) : home ? 'Friends' : ''}</div>
       <div class="title-right"><${UpdatePill} /></div>
     </div>`
@@ -258,7 +266,7 @@ function Syncing ({ g }) {
 function Welcome () {
   return html`
     <div class="center-card welcome">
-      <div class="hero-mark"><span /><span /><span /></div>
+      <div class="hero-logo"><${Logo} size=${76} title="OpenDiscord" /></div>
       <h1>Hey ${model.me.name}!</h1>
       <p>Create a group for you and your friends, join one with an invite link, or add a friend for private chats and calls. Everything goes straight from device to device — no accounts, no servers, no upload limits.</p>
       <div class="row center">
@@ -273,7 +281,7 @@ function Onboarding () {
   return html`
     <div class="onboarding">
       <div class="center-card">
-        <div class="hero-mark"><span /><span /><span /></div>
+        <div class="hero-logo"><${Logo} size=${76} title="OpenDiscord" /></div>
         <h1>Welcome to OpenDiscord</h1>
         <p>Your identity is a key pair that was just generated on this device. Pick a name your friends will see.</p>
         <${ProfileEditor} cta="Continue" />
@@ -390,6 +398,9 @@ async function boot () {
       case 'sound':
         onRemoteSound(gid, from, d)
         break
+      case 'doc':
+        model.setDocPresence(gid, from, d)
+        break
     }
   })
   api.on('blob-progress', onBlobProgress)
@@ -409,6 +420,7 @@ async function boot () {
   loadClaudeInfo()
   startPresence()
   startPoker()
+  watchSystemMode(() => model.emit())
 
   render(html`<${App} />`, document.getElementById('root'))
 }

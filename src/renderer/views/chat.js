@@ -161,6 +161,7 @@ export function ChatView ({ g, ch }) {
         ${dm && html`<button class="icon-btn" title=${voice.inChannel(g.id, DM_CALL) ? 'Open call' : 'Start a call'} onClick=${() => startDmCall(g)}><${Icon} name="phone" /></button>`}
         ${dm && html`<button class="icon-btn" title="Shared calendar" onClick=${() => model.openPlanner(g.id, 'calendar')}><${Icon} name="calendar" /></button>`}
         ${dm && html`<button class="icon-btn" title="Shared tasks" onClick=${() => model.openPlanner(g.id, 'tasks')}><${Icon} name="tasks" /></button>`}
+        ${dm && html`<button class="icon-btn" title="Focus docs: write together" onClick=${() => model.openDocs(g.id)}><${Icon} name="focus" /></button>`}
         ${dm
           ? html`<button class="icon-btn" title="Games" onClick=${() => model.openGames(g.id)}><${Icon} name="chess" /></button>`
           : !g.kickedMe && html`<button class="icon-btn" title="Play a game in this channel" onClick=${() => model.openModal('newGame', { gid: g.id, ch: ch.id })}><${Icon} name="chess" /></button>`}
