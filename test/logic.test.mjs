@@ -11,7 +11,9 @@ const realInterval = globalThis.setInterval
 globalThis.setInterval = (fn, ms) => { const t = realInterval(fn, ms); t.unref?.(); return t }
 
 const chess = await import('../src/renderer/lib/chess.js')
-const { deriveChess, clockLeft, moveLeft } = await import('../src/renderer/lib/games.js')
+const { deriveChess, clockLeft, moveLeft, cleanGameInfo, BOT } = await import('../src/renderer/lib/games.js')
+const bot = await import('../src/renderer/lib/chessbot.js')
+const { contextMenuItems } = (await import('node:module')).createRequire(import.meta.url)('../src/main/contextmenu.js')
 const { Model } = await import('../src/renderer/lib/model.js')
 
 const A = 'a'.repeat(64)
@@ -248,11 +250,95 @@ test('group settings: each setting keeps its own newest value, only admins count
   const g = m.groups.get('g1')
   m.applyOps('g1', [raw('group.settings', A, { invites: 'admins' }, 10)])
   m.applyOps('g1', [raw('group.settings', A, { claude: 'off' }, 20)])
-  assert.deepStrictEqual(m.groupSettings(g), { invites: 'admins', claude: 'off' })
+  assert.deepStrictEqual(m.groupSettings(g), { invites: 'admins', claude: 'off', apps: [] })
   m.applyOps('g1', [raw('group.settings', B, { claude: 'on', invites: 'all' }, 30)]) // not an admin
-  assert.deepStrictEqual(m.groupSettings(g), { invites: 'admins', claude: 'off' })
-  assert.deepStrictEqual(m.settingsWith(g, { claude: 'on' }), { invites: 'admins', claude: 'on' })
+  assert.deepStrictEqual(m.groupSettings(g), { invites: 'admins', claude: 'off', apps: [] })
+  assert.deepStrictEqual(m.settingsWith(g, { claude: 'on' }), { invites: 'admins', claude: 'on', apps: [] })
   assert.strictEqual(m.claudeAllowed(g), false)
+})
+
+test('group apps: none at first, only admins add or remove them, private chats have all', () => {
+  seq = { [A]: 0, [B]: 0, [C]: 0 }
+  const m = makeModel()
+  const g = m.groups.get('g1')
+  for (const id of ['calendar', 'tasks', 'games', 'docs']) assert.strictEqual(m.appOn(g, id), false)
+  m.applyOps('g1', [raw('group.settings', B, { apps: ['calendar'] }, 10)]) // not an admin
+  assert.strictEqual(m.appOn(g, 'calendar'), false)
+  m.applyOps('g1', [raw('group.settings', A, m.settingsWith(g, { apps: ['games', 'nonsense', 'calendar', 'games'] }), 20)])
+  assert.deepStrictEqual(m.groupSettings(g).apps, ['calendar', 'games']) // known ones, once, in a fixed order
+  assert.strictEqual(m.appOn(g, 'games'), true)
+  assert.strictEqual(m.appOn(g, 'docs'), false)
+  // changing another setting keeps the apps
+  m.applyOps('g1', [raw('group.settings', A, m.settingsWith(g, { invites: 'admins' }), 30)])
+  assert.deepStrictEqual(m.groupSettings(g), { invites: 'admins', claude: 'on', apps: ['calendar', 'games'] })
+  // an older op (or one without apps) doesn't bring removed apps back
+  m.applyOps('g1', [raw('group.settings', A, { apps: [] }, 40), raw('group.settings', A, { apps: ['tasks'] }, 5), raw('group.settings', A, { claude: 'off' }, 50)])
+  assert.deepStrictEqual(m.groupSettings(g).apps, [])
+  // a private chat isn't a group with settings: everything is there
+  assert.strictEqual(m.appOn({ dm: B }, 'calendar'), true)
+  assert.strictEqual(m.appOn(null, 'calendar'), false)
+})
+
+test('chess vs the computer: starts at once, the creator plays its moves, nobody can join', () => {
+  seq = { [A]: 0, [B]: 0, [C]: 0 }
+  // what the app posts: opp = the creator, so apps from before 0.7 offer nobody to join
+  const info = cleanGameInfo({ kind: 'chess', side: 'b', opp: A, bot: 3, tc: { base: 60000, inc: 0 } })
+  assert.deepStrictEqual(info, { kind: 'chess', side: 'b', opp: null, tc: null, bot: 3 })
+  assert.strictEqual(cleanGameInfo({ kind: 'chess', side: 'w', bot: 7 }).bot, null)
+  const g = (ops, by = A) => deriveChess({ info, by, ops })
+  let st = g([])
+  assert.strictEqual(st.status, 'active')
+  assert.strictEqual(st.white, BOT)
+  assert.strictEqual(st.black, A)
+  // joins don't count, nor moves from anyone but the creator
+  st = g([op('join', B, {}, 1), op('move', B, { n: 1, m: 'e2e4' }, 2), op('move', A, { n: 1, m: 'd2d4' }, 3), op('move', A, { n: 2, m: 'd7d5' }, 4)])
+  assert.strictEqual(st.white, BOT)
+  assert.deepStrictEqual(st.plies.map(p => p.san), ['d4', 'd5'])
+  // cancel before the second move, resign later; draws can't be agreed with it
+  assert.strictEqual(g([op('move', A, { n: 1, m: 'e2e4' }, 5), op('abort', A, { n: 1 }, 6)]).reason, 'aborted')
+  assert.strictEqual(g([op('draw', A, { n: 0 }, 7)]).status, 'active')
+  st = g([...moves(['e2e4', 'e7e5', 'd1h5'], A, A, 10), op('resign', A, { n: 3 }, 20)])
+  assert.deepStrictEqual([st.result, st.reason], ['1-0', 'resign'])
+})
+
+test('chess computer: takes mate in one and free pieces, saves its queen, answers in time', () => {
+  let s = 11
+  const rng = () => (s = (s * 16807) % 2147483647) / 2147483647
+  const F = 'abcdefgh'
+  const uci = (m) => F[m.from & 7] + ((m.from >> 3) + 1) + F[m.to & 7] + ((m.to >> 3) + 1) + (m.promo || '')
+  const pick = (fen, level, timeMs = 500) => uci(bot.chooseMove(chess.fromFen(fen), { level, rng, timeMs }))
+  for (const level of [1, 2, 3]) assert.strictEqual(pick('6k1/5ppp/8/8/8/8/5PPP/3R2K1 w - - 0 1', level), 'd1d8')
+  for (const level of [2, 3]) {
+    assert.strictEqual(pick('rnb1kbnr/pppp1ppp/8/3q4/8/2N5/PPPP1PPP/R1BQKBNR w KQkq - 0 1', level), 'c3d5')
+    // its queen is attacked by a knight: it moves the queen, and not to where it's taken
+    const p = chess.fromFen('rnb1kbnr/pppp1ppp/8/4p3/7q/2N2N2/PPPPPPPP/R1BQKB1R b KQkq - 0 1')
+    const m = bot.chooseMove(p, { level, rng, timeMs: 500 })
+    assert.strictEqual(p.b[m.from], 'q')
+    assert.ok(!chess.legalMoves(chess.play(p, m)).some(x => x.to === m.to), 'the queen stays safe')
+  }
+  // the opening book, and a garbled game gives no move
+  assert.ok(['e2e4', 'd2d4', 'c2c4', 'g1f3'].includes(bot.botReply([], 3, { rng })))
+  assert.ok(['e7e5', 'c7c5', 'e7e6', 'c7c6'].includes(bot.botReply(['e2e4'], 1, { rng })))
+  assert.strictEqual(bot.botReply(['e2e4', 'nonsense'], 2), null)
+  const fen = 'r1bq1rk1/pp2bppp/2n1pn2/2pp4/3P4/2PBPN2/PP1N1PPP/R1BQ1RK1 w - - 0 8'
+  const t0 = Date.now()
+  assert.ok(chess.findMove(chess.fromFen(fen), pick(fen, 3, 400)))
+  assert.ok(Date.now() - t0 < 1500, 'Hard keeps to its time')
+  assert.deepStrictEqual(bot.BOT_LEVELS.map(l => l.name), ['Easy', 'Medium', 'Hard'])
+})
+
+test('right-click menu: edit actions in text boxes, copy for selections, links and spelling', () => {
+  const act = { replace () {}, learn () {}, openLink () {}, copyText () {}, copyImage () {} }
+  const labels = (p) => contextMenuItems(p, act).map(i => i.type === 'separator' ? '-' : i.label)
+  assert.deepStrictEqual(labels({}), [])
+  assert.deepStrictEqual(labels({ selectionText: '  ' }), [])
+  assert.deepStrictEqual(labels({ selectionText: 'hello' }), ['Copy'])
+  const edit = contextMenuItems({ isEditable: true, editFlags: { canPaste: true, canSelectAll: true } }, act)
+  assert.deepStrictEqual(edit.map(i => i.type === 'separator' ? '-' : i.label), ['Undo', 'Redo', '-', 'Cut', 'Copy', 'Paste', '-', 'Select all'])
+  assert.deepStrictEqual(edit.filter(i => i.enabled).map(i => i.role), ['paste', 'selectAll'])
+  assert.deepStrictEqual(labels({ isEditable: true, misspelledWord: 'helo', dictionarySuggestions: ['hello', 'help'], editFlags: {} }).slice(0, 4), ['hello', 'help', 'Add to dictionary', '-'])
+  assert.deepStrictEqual(labels({ linkURL: 'https://example.com', selectionText: 'x' }), ['Open link', 'Copy link', '-', 'Copy'])
+  assert.deepStrictEqual(labels({ linkURL: 'javascript:alert(1)' }), []) // only web links
 })
 
 test('messages: Claude answers and chess cards are recognised', () => {

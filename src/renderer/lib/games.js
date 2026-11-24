@@ -1,6 +1,9 @@
 // Chess games played through signed ops, so they sync like messages (live or one move a day).
 //
 //  msg { game: { kind: 'chess', side, opp, tc } }   starts a game; the message is its card
+//  msg { game: { kind: 'chess', side, bot } }       a game against the computer (bot = level 1..3):
+//                                                   it starts right away, and the creator's app
+//                                                   plays the computer's side (lib/chessbotplay.js)
 //  game.join    { id }              takes the free seat (or accepts a challenge)
 //  game.decline { id }              the challenged person says no
 //  game.move    { id, n, m, left }  ply n (1 = white's first move) as UCI, e.g. 'e2e4', 'e7e8q';
@@ -17,6 +20,9 @@ import { START, fromFen, legalMoves, findMove, play, san, outcome, positionKey, 
 import { cleanPokerInfo } from './poker.js'
 
 const isKey = (k) => typeof k === 'string' && /^[0-9a-f]{64}$/.test(k)
+
+// The computer's seat in a game against it (st.white / st.black)
+export const BOT = 'bot'
 
 export const TIME_CONTROLS = [
   { id: 'none', label: 'No clock', hint: 'Take your time, even days', tc: null },
@@ -35,7 +41,11 @@ export function cleanGameInfo (d) {
   if (d.tc && typeof d.tc === 'object' && Number.isFinite(d.tc.base) && d.tc.base >= 30000 && d.tc.base <= 3 * 3600000) {
     tc = { base: Math.round(d.tc.base), inc: Math.max(0, Math.min(60000, Math.round(Number(d.tc.inc) || 0))) }
   }
-  return { kind: 'chess', side: d.side === 'b' ? 'b' : 'w', opp: isKey(d.opp) ? d.opp : null, tc }
+  // Against the computer: no clock, and nobody else can take the other seat. (The game also
+  // names its creator as `opp`, so apps from before 0.7 don't offer anyone to join it.)
+  const bot = [1, 2, 3].includes(d.bot) ? d.bot : null
+  if (bot) return { kind: 'chess', side: d.side === 'b' ? 'b' : 'w', opp: null, tc: null, bot }
+  return { kind: 'chess', side: d.side === 'b' ? 'b' : 'w', opp: isKey(d.opp) ? d.opp : null, tc, bot: null }
 }
 
 export const REASONS = {
@@ -75,9 +85,14 @@ export function deriveChess (game) {
   else st.black = by
   const seat = (side) => (side === 'w' ? st.white : st.black)
   const player = (a) => a === st.white || a === st.black
+  if (info.bot) {
+    if (info.side === 'w') st.black = BOT
+    else st.white = BOT
+    st.status = 'active'
+  }
 
   // 1. Until someone takes the free seat: joins, the creator cancelling, the challenged declining
-  for (const o of game.ops.filter(o => o.k === 'join' || o.k === 'abort' || o.k === 'decline').sort(order)) {
+  for (const o of info.bot ? [] : game.ops.filter(o => o.k === 'join' || o.k === 'abort' || o.k === 'decline').sort(order)) {
     if (o.k === 'join' && o.a !== by && (!info.opp || o.a === info.opp)) {
       if (info.side === 'w') st.black = o.a
       else st.white = o.a
@@ -131,7 +146,8 @@ export function deriveChess (game) {
     return false
   }
   while (!settle()) {
-    const mover = seat(p.turn)
+    // the computer's moves come from the app of whoever started the game
+    const mover = seat(p.turn) === BOT ? by : seat(p.turn)
     const legal = legalMoves(p)
     let chosen = null
     let mv = null

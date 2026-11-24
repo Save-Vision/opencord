@@ -150,6 +150,9 @@ export function VoiceStage ({ g, ch }) {
   const keys = participantsOf(g, ch.id)
   // focus: null = automatic (spotlight the first friend who is streaming), 'grid' = no spotlight
   const [focus, setFocus] = useState(null)
+  // someone's name was clicked in the channel list: spotlight their stream
+  const want = model.ui.stage?.focus
+  useEffect(() => { if (want?.id) setFocus(want.id) }, [want?.n])
 
   if (!joined) {
     return html`

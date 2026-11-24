@@ -80,9 +80,12 @@ function dmStatus (g) {
   const k = g.dm
   if (!model.isFriend(k)) return 'Friend request sent'
   if (voice.inChannel(g.id, DM_CALL)) return 'In a call with you'
-  if (g.voice.get(k)?.ch === DM_CALL) return 'Calling…'
-  return g.online.has(k) ? 'Online' : 'Offline'
+  const call = g.voice.get(k)
+  if (call?.ch === DM_CALL) return model.ui.dismissedCalls?.has(g.id + ':' + call.sid) ? 'In a call' : 'Calling…'
+  return PRESENCE_LABEL[model.presence(g, k)]
 }
+
+const PRESENCE_LABEL = { online: 'Online', away: 'Away', offline: 'Offline' }
 
 export function HomeSidebar ({ g, footer }) {
   const dms = model.dmsList()
@@ -99,10 +102,9 @@ export function HomeSidebar ({ g, footer }) {
         ${dms.map((d) => {
           const k = d.dm
           const u = model.unread(d, DM_TEXT)
-          const online = d.online.has(k)
           return html`
             <button key=${d.id} class="dm-item ${g?.id === d.id ? 'active' : ''} ${u.count ? 'unread' : ''} ${model.isFriend(k) ? '' : 'pending'}" onClick=${() => openDm(d)}>
-              <${Avatar} name=${model.groupName(d)} color=${model.memberColor(d, k)} src=${model.memberAvatar(d, k)} size=${32} dot=${online ? 'online' : 'offline'} speaking=${voice.speaking.has(k)} />
+              <${Avatar} name=${model.groupName(d)} color=${model.memberColor(d, k)} src=${model.memberAvatar(d, k)} size=${32} dot=${model.presence(d, k)} speaking=${voice.speaking.has(k)} />
               <div class="dm-meta"><b>${model.groupName(d)}</b><small>${dmStatus(d)}</small></div>
               ${u.count > 0 && html`<span class="badge">${u.count}</span>`}
               ${(d.voice.get(k)?.ch === DM_CALL || voice.inChannel(d.id, DM_CALL)) && html`<${Icon} name="phone" size=${14} class="good" />`}
@@ -119,7 +121,7 @@ function FriendRow ({ g }) {
   const name = model.groupName(g)
   return html`
     <div class="friend-row" onClick=${() => openDm(g)}>
-      <${Avatar} name=${name} color=${model.memberColor(g, k)} src=${model.memberAvatar(g, k)} size=${36} dot=${g.online.has(k) ? 'online' : 'offline'} />
+      <${Avatar} name=${name} color=${model.memberColor(g, k)} src=${model.memberAvatar(g, k)} size=${36} dot=${model.presence(g, k)} />
       <div class="fr-meta"><b>${name}</b><small>${dmStatus(g)}</small></div>
       <div class="fr-actions" onClick=${(e) => e.stopPropagation()}>
         <button class="round-btn" title="Message" onClick=${() => openDm(g)}><${Icon} name="at" size=${18} /></button>
@@ -186,7 +188,8 @@ export function FriendsPage () {
   const { incoming, outgoing } = model.friends
   const tab = model.ui.friendsTab || (incoming.length ? 'pending' : friends.length ? 'online' : 'add')
   const setTab = (t) => { model.ui.friendsTab = t; model.emit() }
-  const online = friends.filter(g => g.online.has(g.dm))
+  // "Online" includes friends who are away, like everywhere else; "appear offline" counts as offline
+  const online = friends.filter(g => model.presence(g, g.dm) !== 'offline')
   const list = tab === 'online' ? online : friends
   return html`
     <section class="chat friends-page">

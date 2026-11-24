@@ -1,6 +1,6 @@
 // Emoji picker (composer and reactions) and :shortcode: suggestions.
 // Data: unicode-emoji-json (all emoji of the current Unicode version, grouped like on phones).
-import { html, useState, useEffect, useRef, useMemo } from '../vendor/preact-htm.js'
+import { html, useState, useEffect, useLayoutEffect, useRef, useMemo } from '../vendor/preact-htm.js'
 import { Icon } from '../lib/icons.js'
 
 const CATEGORY_ICON = { 'Smileys & Emotion': '😀', 'People & Body': '👋', 'Animals & Nature': '🐻', 'Food & Drink': '🍕', 'Travel & Places': '✈️', Activities: '⚽', Objects: '💡', Symbols: '❤️', Flags: '🏁' }
@@ -73,6 +73,24 @@ function useOutsideClose (ref, onClose) {
 }
 
 // The full picker. Shift-click keeps it open to pick several.
+// The reaction picker opens below the message. On the newest messages that would run off the
+// bottom of the chat, so it opens upwards instead, or (in a very small window) as far up as fits.
+function keepInView (el) {
+  if (!el) return
+  const r = el.getBoundingClientRect()
+  let box = el.parentElement
+  while (box && box !== document.body && !/auto|scroll/.test(getComputedStyle(box).overflowY)) box = box.parentElement
+  const c = box && box !== document.body ? box.getBoundingClientRect() : { top: 0, bottom: window.innerHeight }
+  const lo = Math.max(c.top, 0) + 6
+  const hi = Math.min(c.bottom, window.innerHeight) - 6
+  if (r.bottom <= hi) return
+  const anchor = el.offsetParent?.getBoundingClientRect()
+  if (anchor && anchor.top + 14 - r.height >= lo) { el.classList.add('up'); return }
+  const h = Math.min(r.height, hi - lo)
+  if (h < r.height) el.style.height = h + 'px'
+  el.style.top = (el.offsetTop + Math.max(lo, hi - h) - r.top) + 'px'
+}
+
 export function EmojiPanel ({ onPick, onClose, class: cls = '' }) {
   const ref = useRef()
   const gridRef = useRef()
@@ -82,6 +100,7 @@ export function EmojiPanel ({ onPick, onClose, class: cls = '' }) {
   const [active, setActive] = useState(0)
   useOutsideClose(ref, onClose)
   useEffect(() => { if (!data) loadEmoji().then(setData, () => setData([])) }, [])
+  useLayoutEffect(() => { if (cls.includes('for-message')) keepInView(ref.current) }, [])
 
   const sections = useMemo(() => {
     if (!data) return []

@@ -177,6 +177,24 @@ try {
   await bob.locator('.emoji-panel .ep-search input').fill('fire')
   await bob.locator('.emoji-panel .ep-emojis button', { hasText: '🔥' }).first().click()
   await alice.locator('.reaction', { hasText: '🔥' }).waitFor({ timeout: 10000 })
+  // the picker on the newest message opens upwards, inside the chat instead of cut off below it
+  const lastMsg = bob.locator('.msg').last()
+  await lastMsg.hover()
+  await lastMsg.locator('.msg-tools button[title="Add reaction"]').dispatchEvent('click')
+  await bob.locator('.emoji-panel.for-message').waitFor({ timeout: 5000 })
+  const pickerFits = await bob.evaluate(() => {
+    const el = document.querySelector('.emoji-panel.for-message')
+    let sc = el.parentElement
+    while (sc && !/(auto|scroll)/.test(getComputedStyle(sc).overflowY)) sc = sc.parentElement
+    const p = el.getBoundingClientRect()
+    const box = sc ? sc.getBoundingClientRect() : { top: 0, bottom: window.innerHeight }
+    return p.top >= box.top - 1 && p.bottom <= box.bottom + 1
+  })
+  if (!pickerFits) throw new Error('the reaction picker on the last message is cut off')
+  await settle(bob)
+  await shot(bob, '11-emoji-last-message')
+  await bob.keyboard.press('Escape')
+  await bob.locator('.emoji-panel').waitFor({ state: 'detached', timeout: 3000 })
 
   step('pin a message')
   await bob.locator('.msg', { has: bob.locator('.text', { hasText: 'this is fully p2p' }) }).hover()
@@ -372,6 +390,26 @@ try {
   await alice.waitForFunction(() => window.__od.model.settings.layout?.order?.join() === 'rail,nav,main,side', null, { timeout: 5000 })
   await alice.keyboard.press('Escape')
 
+  step('apps: a group starts without any; only the owner and admins add them')
+  if (await alice.locator('.planner-link').count() || await bob.locator('.planner-link').count()) throw new Error('a new group should have no apps')
+  if (await bob.locator('.add-app-hint').count()) throw new Error('only admins can add apps')
+  await bob.locator('.group-header').click()
+  await bob.locator('.dropdown').waitFor()
+  if (await bob.locator('.dropdown button', { hasText: /^Apps$/ }).count()) throw new Error('only admins can add apps')
+  await bob.locator('.composer textarea').click()
+  await bob.locator('.dropdown').waitFor({ state: 'detached', timeout: 3000 })
+  await alice.locator('.add-app-hint').click()
+  await alice.locator('.app-row').first().waitFor()
+  for (const name of ['Calendar', 'Tasks', 'Games', 'Focus docs']) {
+    await alice.locator('.app-row', { hasText: name }).getByRole('button', { name: 'Add', exact: true }).click()
+    await alice.locator('.app-row.added', { hasText: name }).waitFor({ timeout: 5000 })
+  }
+  await settle(alice)
+  await shot(alice, '55-apps')
+  await alice.locator('.modal footer').getByRole('button', { name: 'Done' }).click()
+  await alice.locator('.add-app-hint').waitFor({ state: 'detached', timeout: 5000 })
+  for (const name of ['Calendar', 'Tasks', 'Games', 'Focus docs']) await bob.locator('.planner-link', { hasText: name }).waitFor({ timeout: 15000 })
+
   step('focus docs: write in one document together, nothing else on screen')
   await alice.locator('.docs-link').click()
   await alice.getByRole('button', { name: 'New document' }).click()
@@ -502,6 +540,17 @@ try {
   await bFolder.locator('.channel', { hasText: 'minecraft' }).waitFor({ state: 'detached', timeout: 5000 })
   await bFolder.locator('.folder-name').click()
   await bFolder.locator('.channel', { hasText: 'minecraft' }).waitFor({ timeout: 5000 })
+  // more folders: the button stays there after the first one, and folders go inside folders too
+  await alice.locator('.add-folder-hint', { hasText: 'New folder' }).click()
+  await alice.locator('.modal input').fill('Music')
+  await alice.locator('.modal footer').getByRole('button', { name: 'Create' }).click()
+  await bob.locator('.folder-head', { hasText: 'Music' }).waitFor({ timeout: 10000 })
+  await aFolder.locator('.folder-head').first().hover()
+  await aFolder.locator('.folder-head').first().locator('button[title="Create a folder inside"]').click()
+  await alice.locator('.modal input').fill('Shooters')
+  await alice.locator('.modal footer').getByRole('button', { name: 'Create' }).click()
+  await bFolder.locator('.folder-head', { hasText: 'Shooters' }).waitFor({ timeout: 10000 })
+  console.log('   folders:', await bob.locator('.folder-head').count())
   await openChannel(alice, 'general')
 
   step('chess: challenge, accept, play, agree a draw')
@@ -535,6 +584,31 @@ try {
   await openChannel(alice, 'general')
   await openChannel(bob, 'general')
   await bob.locator('.game-card .gc-status', { hasText: 'Draw by agreement' }).waitFor({ timeout: 5000 })
+
+  step('chess: against the computer')
+  await alice.locator('.chat-header button[title="Play a game in this channel"]').click()
+  await alice.locator('.modal select').first().selectOption({ label: 'The computer' })
+  await alice.locator('.tc-pick button', { hasText: 'Easy' }).click()
+  await alice.locator('.modal footer').getByRole('button', { name: 'Start game' }).click()
+  await alice.locator('.chess-board').waitFor({ timeout: 5000 })
+  await alice.locator('.game-status', { hasText: 'Your move' }).waitFor({ timeout: 10000 })
+  await alice.locator('[data-sq="e2"]').click()
+  await alice.locator('[data-sq="e4"]').click()
+  await alice.waitForFunction(() => document.querySelectorAll('.mv').length === 2, null, { timeout: 20000 })
+  await alice.locator('[data-sq="d2"]').click()
+  await alice.locator('[data-sq="d4"]').click()
+  await alice.waitForFunction(() => document.querySelectorAll('.mv').length === 4, null, { timeout: 20000 })
+  console.log('   the computer played:', (await alice.locator('.mv').allTextContents()).join(' '))
+  await alice.locator('.game-status', { hasText: 'Your move' }).waitFor({ timeout: 5000 })
+  await shot(alice, '33-chess-computer')
+  // everyone else can watch it, nobody can take the computer's seat
+  const botCard = bob.locator('.game-card', { has: bob.locator('.gc-kind', { hasText: 'vs computer' }) })
+  await botCard.waitFor({ timeout: 10000 })
+  if (await botCard.getByRole('button', { name: /Play as|Accept/ }).count()) throw new Error('someone could join a game against the computer')
+  await alice.locator('button.danger-ghost', { hasText: 'Resign' }).click()
+  await alice.locator('.modal footer').getByRole('button', { name: 'Resign' }).click()
+  await alice.locator('.game-status', { hasText: 'Computer won' }).waitFor({ timeout: 10000 })
+  await openChannel(alice, 'general')
 
   step('@claude: only people with their own API key can ask')
   await bob.locator('.composer textarea').fill('@claude are you there?')
@@ -723,6 +797,11 @@ try {
   console.log('   alice sees bob:', (await alice.locator('.tile-conn').textContent()).trim())
   console.log('   bob sees alice:', (await bob.locator('.tile-conn').textContent()).trim())
   console.log('   AI noise suppression active:', await alice.evaluate(() => window.__od.voice.denoised), '/', await bob.evaluate(() => window.__od.voice.denoised))
+  // back to the call from a text channel: click the call status at the bottom
+  await openChannel(alice, 'general')
+  await alice.locator('.tile-conn').waitFor({ state: 'detached', timeout: 5000 })
+  await alice.locator('.vp-status').click()
+  await alice.locator('.tile-conn.good').waitFor({ timeout: 5000 })
 
   step('soundboard')
   await alice.evaluate(async () => {
@@ -783,6 +862,7 @@ try {
   await alice.locator('.tile-viewers.none').waitFor({ timeout: 5000 })
   await bob.locator('.tile.screen .watch-btn').waitFor({ timeout: 20000 })
   if (await bob.locator('.tile.screen video').count()) throw new Error('stream started before bob chose to watch')
+  await bob.waitForFunction(() => window.__od.voice.sharing.size === 1, null, { timeout: 5000 }) // and played the "went live" sound
   const sentBefore = await alice.evaluate(() => [...window.__od.voice.calls.values()][0]?.sendingScreen)
   if (sentBefore) throw new Error('alice sends her screen to someone who is not watching')
   await shot(bob, '29-watch-card')
@@ -819,7 +899,8 @@ try {
   await alice.locator('.tile-viewers.none').waitFor({ timeout: 10000 })
   await alice.waitForFunction(() => ![...window.__od.voice.calls.values()][0]?.sendingScreen, null, { timeout: 10000 })
   console.log('   alice stopped sending video once bob stopped watching')
-  await bob.locator('.tile.screen .watch-btn').click()
+  // watch again by clicking Alice's name in the voice channel
+  await bob.locator('.voice-user', { hasText: 'Alice' }).click()
   await bob.locator('.tile.screen video').waitFor({ timeout: 20000 })
   await alice.locator('.tile-viewers', { hasText: 'Bob' }).waitFor({ timeout: 10000 })
   if (await bob.locator('.tile.screen .stream-mute').count()) {
@@ -900,6 +981,14 @@ try {
   await alice.locator('.dm-item', { hasText: 'Bob' }).click()
   await alice.locator('.chat-header h2', { hasText: 'Bob' }).waitFor({ timeout: 5000 })
   await alice.locator('.chat-header .presence.online').waitFor({ timeout: 10000 })
+  // the friend list shows away too, not just online or offline
+  await alice.locator('.up-me').click()
+  await statusBtn('Away').click()
+  await bob.locator('.dm-item', { hasText: 'Alice' }).locator('.presence.away').waitFor({ timeout: 10000 })
+  await bob.locator('.dm-item', { hasText: 'Alice' }).locator('.dm-meta small', { hasText: 'Away' }).waitFor({ timeout: 5000 })
+  await alice.locator('.up-me').click()
+  await statusBtn('Online').click()
+  await bob.locator('.dm-item', { hasText: 'Alice' }).locator('.presence.online').waitFor({ timeout: 10000 })
   await bob.locator('.dm-item', { hasText: 'Alice' }).click()
   await bob.locator('.composer textarea').fill('just between us 🤫')
   await bob.keyboard.press('Enter')
@@ -926,8 +1015,12 @@ try {
   console.log('   private call connected:', (await alice.locator('.tile-conn').textContent()).trim())
   for (const p of [alice, bob]) await p.evaluate(() => { window.__od.model.forceRelay = false })
   await shot(alice, '23-private-call')
+  // Alice hangs up: the call ends for Bob too, and neither gets a ringing call afterwards
   await alice.locator('.call-controls .hangup').click()
-  await bob.evaluate(() => window.__od.voice.leave())
+  await bob.waitForFunction(() => !window.__od.voice.active, null, { timeout: 10000 })
+  await alice.waitForTimeout(2000)
+  if (await alice.locator('.call-banner').count() || await bob.locator('.call-banner').count()) throw new Error('a call rang right after hanging up')
+  console.log('   hanging up ended the call for both, nothing rang afterwards')
 
   step('kick')
   await alice.locator('.rail-btn[title="Squad"]').click()

@@ -164,7 +164,7 @@ export function ChatView ({ g, ch }) {
         ${dm && html`<button class="icon-btn" title="Focus docs: write together" onClick=${() => model.openDocs(g.id)}><${Icon} name="focus" /></button>`}
         ${dm
           ? html`<button class="icon-btn" title="Games" onClick=${() => model.openGames(g.id)}><${Icon} name="chess" /></button>`
-          : !g.kickedMe && html`<button class="icon-btn" title="Play a game in this channel" onClick=${() => model.openModal('newGame', { gid: g.id, ch: ch.id })}><${Icon} name="chess" /></button>`}
+          : !g.kickedMe && model.appOn(g, 'games') && html`<button class="icon-btn" title="Play a game in this channel" onClick=${() => model.openModal('newGame', { gid: g.id, ch: ch.id })}><${Icon} name="chess" /></button>`}
         ${!g.kickedMe && !g.restoring && html`<button class="icon-btn" title="Create a poll" onClick=${() => model.openModal('poll', { gid: g.id, ch: ch.id })}><${Icon} name="poll" /></button>`}
         <${PinsButton} g=${g} ch=${ch} />
         <button class="icon-btn ${model.ui.search?.gid === g.id ? 'on' : ''}" title="Search (Ctrl+F)" onClick=${() => model.openSearch('')}><${Icon} name="search" /></button>
@@ -694,6 +694,10 @@ function Composer ({ g, ch, handle, thread = null }) {
   const send = async () => {
     const t = text.trim()
     if ((!t && !files.length) || busy) return
+    if (/^\/(chess|poker)\b/i.test(t) && !files.length && !model.appOn(g, 'games')) {
+      model.toast(model.isMod(g, model.me.key) ? 'Add the Games app to this group first: group menu → Apps.' : "This group doesn't have the Games app. The owner or an admin can add it (group menu → Apps).", 'error')
+      return
+    }
     if (/^\/chess\b/i.test(t) && !files.length) {
       setText('')
       model.openModal('newGame', { gid: g.id, ch: ch.id })

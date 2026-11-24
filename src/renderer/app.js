@@ -13,6 +13,7 @@ import { Members, DmProfile, MemberMenu } from './views/members.js'
 import { HomeSidebar, FriendsPage, CallBanner, homeUnread, openDm } from './views/friends.js'
 import { Sidebar } from './views/sidebar.js'
 import { GamesView, notifyGameOps } from './views/games.js'
+import { startChessBot } from './lib/chessbotplay.js'
 import { SearchPanel } from './views/search.js'
 import { UpdateRequired } from './views/compat.js'
 import { AccountNote } from './views/account.js'
@@ -36,10 +37,11 @@ function App () {
   const home = model.ui.gid === HOME || !!g?.dm
   const stage = model.ui.stage && g && model.ui.stage.gid === g.id ? g.channels.get(model.ui.stage.ch) : null
   const ch = g ? model.currentChannel(g) : null
-  const games = !stage && g && model.ui.games?.gid === g.id
-  const docsUi = !stage && !games && g && model.ui.docs?.gid === g.id ? model.ui.docs : null
+  // Apps the group doesn't have (lib/apps.js) aren't shown, except a game opened from its card
+  const games = !stage && g && model.ui.games?.gid === g.id && (!!model.ui.games.id || model.appOn(g, 'games'))
+  const docsUi = !stage && !games && g && model.ui.docs?.gid === g.id && model.appOn(g, 'docs') ? model.ui.docs : null
   const focusDoc = docsUi?.id ? g.docs.get(docsUi.id) : null
-  const planner = !stage && !games && !docsUi && g && model.ui.planner?.gid === g.id
+  const planner = !stage && !games && !docsUi && g && model.ui.planner?.gid === g.id && model.appOn(g, model.ui.planner.tab)
   document.documentElement.classList.toggle('focus-on', !!focusDoc)
   const thread = !stage && !planner && g && model.ui.thread?.gid === g.id
   const search = !stage && !planner && g && model.ui.search?.gid === g.id
@@ -180,10 +182,10 @@ function VoicePanel () {
   return html`
     <div class="voice-panel">
       <div class="vp-row">
-        <div class="vp-status ${failed ? 'bad' : connecting ? 'warn' : 'good'}" title=${calls.map(x => model.memberName(g, x.key) + ': ' + connLabel(x).text).join('\n') || 'Nobody else here yet'}>
+        <button class="vp-status ${failed ? 'bad' : connecting ? 'warn' : 'good'}" onClick=${open} title=${'Open the call\n' + (calls.map(x => model.memberName(g, x.key) + ': ' + connLabel(x).text).join('\n') || 'Nobody else here yet')}>
           <${Icon} name="signal" size=${16} />
           <div><b>${status}</b><small>${where}${rtt != null ? ` · ${rtt} ms` : ''}</small></div>
-        </div>
+        </button>
         <button class="icon-btn" title="Disconnect" onClick=${() => voice.leave()}><${Icon} name="leave" size=${18} /></button>
       </div>
       ${voice.serverMuted && html`<div class="vp-note"><${Icon} name="micOff" size=${13} /> A moderator muted you</div>`}
@@ -420,6 +422,7 @@ async function boot () {
   loadClaudeInfo()
   startPresence()
   startPoker()
+  startChessBot()
   watchSystemMode(() => model.emit())
 
   render(html`<${App} />`, document.getElementById('root'))

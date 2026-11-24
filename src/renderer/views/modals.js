@@ -1,6 +1,7 @@
 import { html, useState, useEffect, useRef } from '../vendor/preact-htm.js'
 import { api, model, voice, act, append, rid, saveSettings, blobUrl, COLORS, fmtRate, fmtBytes, initials, cleanErr } from '../lib/core.js'
 import { MAX_FOLDER_DEPTH } from '../lib/model.js'
+import { APPS } from '../lib/apps.js'
 import { loadClaudeInfo } from '../lib/claude.js'
 import { SCREEN_PRESETS, playTone } from '../lib/voice.js'
 import { getMic, stopMic, noiseMode, isDenoised } from '../lib/denoise.js'
@@ -57,6 +58,7 @@ export function Modals () {
     folder: FolderModal,
     newGame: NewGameModal,
     groupClaude: GroupClaudeModal,
+    apps: AppsModal,
     poll: PollModal,
     addSound: AddSoundModal,
     backup: BackupModal,
@@ -400,6 +402,36 @@ function GroupClaudeModal ({ gid }) {
         <${Toggle} label="Allow @claude in this group" hint="When it's off, nobody's app sends messages from this group to Claude" checked=${on} onChange=${set} />
       </div>
       <footer><button class="btn" onClick=${() => model.closeModal()}>Done</button></footer>
+    <//>`
+}
+
+// Group apps (lib/apps.js): the owner and admins add or remove them
+function AppsModal ({ gid }) {
+  const g = model.groups.get(gid)
+  if (!g) return null
+  const mod = model.isMod(g, model.me.key) && !g.kickedMe
+  const on = model.groupSettings(g).apps
+  const set = (id, v) => act(() => append(gid, 'group.settings', model.settingsWith(g, { apps: v ? [...on, id] : on.filter(x => x !== id) })))
+  return html`
+    <${Modal} title=${'Apps in ' + model.groupName(g)}>
+      <div class="modal-body">
+        <p class="hint">${mod ? 'Add the apps your group wants. They show up for everyone at the top of the channel list.' : 'Only the owner and admins can add or remove apps.'}</p>
+        <div class="app-list">
+          ${APPS.map(a => {
+            const added = on.includes(a.id)
+            return html`
+              <div key=${a.id} class="app-row ${added ? 'added' : ''}">
+                <div class="app-icon"><${Icon} name=${a.icon} size=${22} /></div>
+                <div class="app-meta"><b>${a.name}</b><small>${a.desc}</small></div>
+                ${mod
+                  ? html`<button class="btn sm ${added ? '' : 'primary'}" onClick=${() => set(a.id, !added)}>${added ? 'Remove' : 'Add'}</button>`
+                  : html`<span class="muted small">${added ? 'Added' : 'Not added'}</span>`}
+              </div>`
+          })}
+        </div>
+        <p class="hint">Removing an app only hides it. Its events, tasks, games or documents stay in the group and come back when it's added again.</p>
+      </div>
+      <footer><div class="spacer" /><button class="btn" onClick=${() => model.closeModal()}>Done</button></footer>
     <//>`
 }
 

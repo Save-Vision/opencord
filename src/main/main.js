@@ -4,6 +4,7 @@ const {
   Tray, Menu, nativeImage, clipboard, globalShortcut, safeStorage, powerMonitor, nativeTheme
 } = require('electron')
 const path = require('path')
+const { attachContextMenu } = require('./contextmenu')
 const fs = require('fs')
 const { Readable } = require('stream')
 const { Store } = require('./store')
@@ -279,6 +280,7 @@ function createWindow () {
   win.on('closed', () => { win = null })
   win.on('focus', () => { win.flashFrame(false); send('focus-change', true) })
   win.on('blur', () => send('focus-change', false))
+  attachContextMenu(win, { Menu, shell, clipboard })
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https?:\/\//i.test(url)) shell.openExternal(url)
     return { action: 'deny' }

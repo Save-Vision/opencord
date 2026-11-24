@@ -51,7 +51,9 @@ const SOUNDS = {
   unmute: [[N.A4, 0, { len: 0.18, level: 0.7, bright: 0.1 }]],
   ring: [[N.E5, 0], [N.G5, 0.12], [N.C6, 0.24, { len: 0.5 }], [N.E5, 0.75], [N.G5, 0.87], [N.C6, 0.99, { len: 0.5 }]],
   message: [[N.C6, 0, { len: 0.25, level: 0.5 }], [N.G5, 0.07, { len: 0.3, level: 0.5 }]],
-  turn: [[N.D5, 0, { len: 0.3 }], [N.A5, 0.1, { len: 0.4 }]] // your turn in a game
+  turn: [[N.D5, 0, { len: 0.3 }], [N.A5, 0.1, { len: 0.4 }]], // your turn in a game
+  stream: [[N.C5, 0, { len: 0.3 }], [N.E5, 0.07, { len: 0.3 }], [N.G5, 0.14, { len: 0.3 }], [N.C6, 0.21, { len: 0.6 }]], // someone started sharing their screen
+  streamEnd: [[N.G5, 0, { len: 0.3, level: 0.7 }], [N.E5, 0.08, { len: 0.3, level: 0.7 }], [N.C5, 0.16, { len: 0.5, level: 0.7 }]] // a screen share ended
 }
 
 export function playTone (kind) {

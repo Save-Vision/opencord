@@ -117,6 +117,7 @@ export class Voice {
     this.local = { mic: null, screen: null, cam: null }
     this.screenOpts = null
     this.watching = new Set() // keys of sharers whose stream I watch
+    this.sharing = new Set() // keys of people in my channel who share their screen (for the start/stop sounds)
     this.muted = false
     this.deafened = false
     this.mutedBeforeDeafen = false
@@ -167,7 +168,9 @@ export class Voice {
     this._broadcastState()
     const g = this.model.groups.get(gid)
     for (const [key, st] of g.voice) {
-      if (this._peerAllowed(key, st)) this._ensureCall(key, st)
+      if (!this._peerAllowed(key, st)) continue
+      this._ensureCall(key, st)
+      if (st.screen) this.sharing.add(key) // already sharing when we came in: no "stream started" sound
     }
     this.api.voiceHotkeys(true)
     playTone('join')
@@ -177,6 +180,11 @@ export class Voice {
   leave (silent = false) {
     if (!this.active) return
     const { gid } = this.active
+    // Hanging up a private call while the friend is still in it must not make it ring right away
+    const dm = this.model.groups.get(gid)
+    const theirs = dm?.dm && dm.voice.get(dm.dm)
+    if (theirs?.sid) (this.model.ui.dismissedCalls ||= new Set()).add(gid + ':' + theirs.sid)
+    this.sharing.clear()
     for (const call of [...this.calls.values()]) this._closeCall(call)
     stopMic(this.local.mic)
     for (const kind of ['mic', 'screen', 'cam']) {
@@ -224,7 +232,8 @@ export class Voice {
   onRemoteVoiceState (gid, key, st) {
     if (!this.active || gid !== this.active.gid) return
     const call = this.calls.get(key)
-    if (this._peerAllowed(key, st)) {
+    const allowed = this._peerAllowed(key, st)
+    if (allowed) {
       if (!call || call.remoteSid !== st.sid) {
         if (call) this._closeCall(call)
         this._ensureCall(key, st)
@@ -236,8 +245,24 @@ export class Voice {
         if (!was && call.sendingScreen) this._applySenderParams(call, 1)
       }
     } else if (call) {
+      const ended = call.everConnected && this.model.groups.get(gid)?.dm
       this._closeCall(call)
       playTone('leave')
+      // A private call ends for both when one hangs up, like a phone call
+      if (ended) {
+        this.leave(true)
+        this.model.toast(this.model.memberName(this.model.groups.get(gid), key) + ' hung up')
+        return
+      }
+    }
+    // A sound when someone in my channel starts (or stops) sharing their screen. Not for someone
+    // who joins while already sharing: their "joined" sound is enough.
+    const sharing = allowed && st.ch === this.active.ch && !!st.screen
+    if (sharing && !this.sharing.has(key)) {
+      this.sharing.add(key)
+      if (call && call.remoteSid === st.sid) playTone('stream')
+    } else if (!sharing && this.sharing.delete(key)) {
+      playTone('streamEnd')
     }
     // Their share ended (or they left): stop watching, so a new share doesn't auto-connect
     if (this.watching.has(key) && !(st.ch === this.active.ch && st.screen)) this.unwatchScreen(key)
@@ -382,6 +407,7 @@ export class Voice {
     pc.onconnectionstatechange = () => {
       call.state = pc.connectionState
       if (pc.connectionState === 'connected') {
+        call.everConnected = true
         this._applyAllSenderParams(call)
         this._readStats(call).then((st) => { call.stats = st; this.model.emit() }, () => {})
       }
@@ -670,8 +696,10 @@ export class Voice {
     vt.addEventListener('ended', () => { if (this.local.screen === stream) this.stopScreen() })
     this.local.screen?.getTracks().forEach(t => t.stop())
     this.local.screen = stream
+    const fresh = !this.screenOpts
     this.screenOpts = { preset, contentHint, audio: wantAudio }
     for (const call of this.calls.values()) { this._attachLocalTracks(call); this._applyAllSenderParams(call) }
+    if (fresh) playTone('stream')
     this._broadcastState()
     this.model.emit()
   }
@@ -681,6 +709,7 @@ export class Voice {
     this.local.screen.getTracks().forEach(t => t.stop())
     this.local.screen = null
     this.screenOpts = null
+    playTone('streamEnd')
     for (const call of this.calls.values()) this._attachLocalTracks(call)
     this._broadcastState()
     this.model.emit()

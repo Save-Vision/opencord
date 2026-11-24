@@ -45,6 +45,7 @@ export const eventsToday = (g) => model.eventsOf(g).filter(e => eventDay(e) === 
 export function PlannerView ({ g }) {
   const tab = model.ui.planner.tab
   const go = (t) => { model.ui.planner = { gid: g.id, tab: t }; model.emit() }
+  const both = model.appOn(g, 'calendar') && model.appOn(g, 'tasks')
   return html`
     <section class="planner">
       <header class="chat-header">
@@ -53,10 +54,11 @@ export function PlannerView ({ g }) {
         <h2>${tab === 'calendar' ? 'Calendar' : 'Tasks'}</h2>
         <span class="header-note"><${Icon} name="lock" size=${13} /> Shared with ${g.dm ? model.groupName(g) : 'everyone in ' + model.groupName(g)}</span>
         <div class="spacer" />
+        ${both && html`
         <div class="seg-tabs">
           <button class=${tab === 'calendar' ? 'active' : ''} onClick=${() => go('calendar')}><${Icon} name="calendar" size=${16} /> Calendar</button>
           <button class=${tab === 'tasks' ? 'active' : ''} onClick=${() => go('tasks')}><${Icon} name="tasks" size=${16} /> Tasks</button>
-        </div>
+        </div>`}
       </header>
       ${tab === 'calendar' ? html`<${Calendar} g=${g} />` : html`<${TaskBoard} g=${g} />`}
     </section>`
@@ -388,7 +390,7 @@ export function startReminders ({ api }) {
     const now = Date.now()
     for (const g of model.groups.values()) {
       if (g.kickedMe) continue
-      for (const e of model.eventsOf(g)) {
+      for (const e of model.appOn(g, 'calendar') ? model.eventsOf(g) : []) {
         if (e.remind == null || e.rsvp.get(model.me.key)?.v === 'no') continue
         const start = eventStart(e)
         const at = e.allDay ? start + 9 * 3600e3 : start - e.remind * 60000
@@ -401,7 +403,7 @@ export function startReminders ({ api }) {
         notify(g, e.title, e.allDay ? 'Today · ' + where : (mins > 1 ? `Starts in ${mins} min` : 'Starting now') + ' · ' + where,
           () => { model.openPlanner(g.id, 'calendar'); model.openModal('event', { gid: g.id, id: e.id }) })
       }
-      for (const t of model.tasksOf(g)) {
+      for (const t of model.appOn(g, 'tasks') ? model.tasksOf(g) : []) {
         if (t.status === 'done' || t.assignee !== model.me.key || !t.due) continue
         const at = parseDay(t.due).getTime() + 9 * 3600e3
         const key = 't:' + g.id + ':' + t.id + ':' + t.due

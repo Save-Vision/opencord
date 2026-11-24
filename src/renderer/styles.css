@@ -136,7 +136,8 @@ kbd { background: var(--bg-4); border-radius: 4px; padding: 1px 5px; font: 11px 
 .ch-edit { opacity: 0; color: var(--text-2); display: grid; place-items: center; padding: 2px; border-radius: 4px; }
 .channel:hover .ch-edit { opacity: 1; }
 .ch-edit:hover { color: var(--text-0); }
-.voice-user { display: flex; align-items: center; gap: 8px; padding: 3px 8px 3px 30px; font-size: 13px; color: var(--text-2); }
+.voice-user { display: flex; align-items: center; gap: 8px; padding: 3px 8px 3px 30px; font-size: 13px; color: var(--text-2); border-radius: 6px; cursor: pointer; }
+.voice-user:hover { background: var(--bg-3); color: var(--text-1); }
 .voice-user.speaking { color: var(--text-0); }
 .vu-name { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .live { background: var(--danger); color: #fff; font-size: 10px; font-weight: 800; padding: 1px 5px; border-radius: 4px; letter-spacing: 0.05em; }
@@ -152,7 +153,8 @@ kbd { background: var(--bg-4); border-radius: 4px; padding: 1px 5px; font: 11px 
 
 .voice-panel { border-top: 1px solid var(--bg-0); padding: 10px 8px 8px; background: var(--bg-05); }
 .vp-row { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
-.vp-status { display: flex; gap: 8px; align-items: center; min-width: 0; }
+.vp-status { display: flex; gap: 8px; align-items: center; min-width: 0; border: 0; background: none; font: inherit; color: inherit; text-align: left; padding: 3px 6px; margin: -3px -6px; border-radius: 6px; cursor: pointer; }
+.vp-status:hover { background: var(--bg-3); }
 .vp-status b { font-size: 13px; display: block; }
 .vp-status small { font-size: 12px; color: var(--text-2); display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 170px; }
 .vp-status.good { color: var(--ok); }
@@ -693,6 +695,8 @@ pre.codeblock code { font: inherit; }
 .emoji-panel { position: absolute; z-index: 45; width: 384px; height: 420px; display: flex; flex-direction: column; background: var(--bg-1); border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 18px 48px rgba(0, 0, 0, 0.55); animation: pop 0.12s ease-out; user-select: none; }
 .emoji-panel.for-composer { right: 16px; bottom: calc(100% + 6px); }
 .emoji-panel.for-message { right: 16px; top: 18px; }
+/* near the bottom of the chat (the newest message): open upwards instead */
+.emoji-panel.for-message.up { top: auto; bottom: calc(100% - 14px); }
 .ep-search { display: flex; align-items: center; gap: 8px; margin: 10px 10px 6px; padding: 0 10px; background: var(--bg-0); border-radius: 8px; color: var(--text-3); }
 .ep-search input { border: 0; background: transparent; padding: 8px 0; }
 .ep-cats { display: flex; gap: 2px; padding: 0 8px 6px; border-bottom: 1px solid var(--border); }
@@ -808,13 +812,14 @@ pre.codeblock code { font: inherit; }
 .empty-note p { margin: 8px 0 0; font-size: 13px; }
 
 /* ---- calendar ---- */
-.calendar { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) 300px; }
-.cal-main { display: flex; flex-direction: column; min-height: 0; padding: 12px 16px 16px; }
+.calendar { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) 300px; grid-template-rows: minmax(0, 1fr); }
+/* the month grows to fill the space, and scrolls when the window (or panel) is too small for it */
+.cal-main { display: flex; flex-direction: column; min-height: 0; padding: 12px 16px 16px; overflow-y: auto; }
 .cal-bar { display: flex; align-items: center; gap: 6px; margin-bottom: 10px; }
 .cal-bar h3 { margin: 0 6px; font-size: 18px; color: var(--text-0); min-width: 170px; text-align: center; }
-.cal-grid { flex: 1; min-height: 0; display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); grid-template-rows: auto repeat(6, minmax(0, 1fr)); gap: 1px; background: var(--border); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+.cal-grid { flex: 1 0 auto; display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); grid-template-rows: auto repeat(6, minmax(84px, 1fr)); gap: 1px; background: var(--border); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
 .cal-head { background: var(--bg-1); color: var(--text-2); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; padding: 6px 8px; }
-.cal-cell { background: var(--bg-2); padding: 4px 5px; min-height: 76px; display: flex; flex-direction: column; gap: 2px; overflow: hidden; }
+.cal-cell { background: var(--bg-2); padding: 4px 5px; min-height: 0; display: flex; flex-direction: column; gap: 2px; overflow: hidden; }
 .cal-cell.other { background: var(--bg-05); }
 .cal-cell.other .cal-date span { color: var(--text-3); }
 .cal-date { display: flex; align-items: center; justify-content: space-between; height: 24px; flex: none; }
@@ -1439,3 +1444,17 @@ html[data-theme=minimal] .ft-sep { background: var(--bg-4); }
 .fp-block li.task { cursor: pointer; }
 .fp-block li.task > input { pointer-events: none; }
 .fp-block li.task:hover > input { outline: 2px solid var(--accent-soft); }
+
+/* ---- group apps (lib/apps.js) ---- */
+.add-app-hint { margin: 2px 0 10px; }
+.app-list { display: flex; flex-direction: column; gap: 8px; margin: 4px 0 12px; }
+.app-row { display: flex; align-items: center; gap: 12px; padding: 10px 12px; border-radius: 10px; background: var(--bg-2); border: 1px solid transparent; transition: border-color 0.15s, background 0.15s; }
+.app-row.added { border-color: var(--accent); background: var(--accent-soft); }
+.app-icon { width: 40px; height: 40px; flex: none; border-radius: 10px; display: grid; place-items: center; background: var(--bg-3); color: var(--text-1); }
+.app-row.added .app-icon { background: var(--accent); color: var(--accent-ink); }
+.app-meta { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.app-meta b { color: var(--text-0); font-size: 14px; }
+.app-meta small { color: var(--text-2); font-size: 12.5px; line-height: 1.35; }
+
+/* ---- chess against the computer (lib/chessbot.js) ---- */
+.bot-avatar { flex: none; border-radius: 50%; display: grid; place-items: center; background: linear-gradient(135deg, var(--accent), var(--bg-3)); color: var(--accent-ink, #fff); }

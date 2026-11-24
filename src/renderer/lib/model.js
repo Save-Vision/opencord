@@ -4,6 +4,7 @@
 import { cleanGameInfo, deriveChess } from './games.js'
 import { derivePoker } from './poker.js'
 import { TextDoc } from './textcrdt.js'
+import { cleanApps } from './apps.js'
 
 const MAX_TEXT = 4000
 const later = (t1, a1, t2, a2) => t1 > t2 || (t1 === t2 && a1 > a2)
@@ -319,9 +320,13 @@ export class Model {
     }
     return {
       invites: best.invites?.d.invites === 'admins' ? 'admins' : 'all',
-      claude: best.claude?.d.claude === 'off' ? 'off' : 'on'
+      claude: best.claude?.d.claude === 'off' ? 'off' : 'on',
+      apps: best.apps ? best.apps.d.apps : [] // lib/apps.js: a group starts without any
     }
   }
+
+  // Whether an app (lib/apps.js) is added to this group. Private chats have them all.
+  appOn (g, id) { return !!g && (!!g.dm || this.groupSettings(g).apps.includes(id)) }
 
   // A group.settings op always carries every setting, so apps that only know some of them
   // (0.4 reads the whole op as "the invite setting") still agree.
@@ -487,6 +492,8 @@ export class Model {
         const s = {}
         if (d.invites === 'admins' || d.invites === 'all') s.invites = d.invites
         if (d.claude === 'on' || d.claude === 'off') s.claude = d.claude
+        const apps = cleanApps(d.apps)
+        if (apps) s.apps = apps
         if (Object.keys(s).length) g.settingsOps.push({ a: op.a, t: op.t, d: s })
         break
       }

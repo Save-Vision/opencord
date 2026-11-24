@@ -1,6 +1,7 @@
 import { html, useState, useEffect, useRef } from '../vendor/preact-htm.js'
 import { model, voice, act, append } from '../lib/core.js'
 import { MAX_FOLDER_DEPTH } from '../lib/model.js'
+import { APPS } from '../lib/apps.js'
 import { Icon } from '../lib/icons.js'
 import { Avatar, leaveGroupFlow } from './chat.js'
 import { myOpenTasks, eventsToday } from './planner.js'
@@ -124,10 +125,11 @@ function GroupMenu ({ g, onClose }) {
   return html`
     <div class="dropdown" ref=${ref}>
       ${model.canInvite(g) && item('userPlus', 'Invite people', () => model.openModal('invite', { gid: g.id }), 'accent')}
-      ${item('calendar', 'Calendar', () => model.openPlanner(g.id, 'calendar'))}
-      ${item('tasks', 'Tasks', () => model.openPlanner(g.id, 'tasks'))}
-      ${item('chess', 'Play chess', () => model.openModal('newGame', { gid: g.id }))}
-      ${item('focus', 'Focus docs', () => model.openDocs(g.id))}
+      ${model.appOn(g, 'calendar') && item('calendar', 'Calendar', () => model.openPlanner(g.id, 'calendar'))}
+      ${model.appOn(g, 'tasks') && item('tasks', 'Tasks', () => model.openPlanner(g.id, 'tasks'))}
+      ${model.appOn(g, 'games') && item('chess', 'Play a game', () => model.openModal('newGame', { gid: g.id }))}
+      ${model.appOn(g, 'docs') && item('focus', 'Focus docs', () => model.openDocs(g.id))}
+      ${model.isMod(g, model.me.key) && !g.kickedMe && item('apps', 'Apps', () => model.openModal('apps', { gid: g.id }))}
       ${item('hash', 'Create text channel', () => model.openModal('channel', { gid: g.id, kind: 'text' }))}
       ${item('speaker', 'Create voice channel', () => model.openModal('channel', { gid: g.id, kind: 'voice' }))}
       ${item('folderPlus', 'Create folder', () => model.openModal('folder', { gid: g.id }))}
@@ -153,6 +155,9 @@ export function Sidebar ({ g, ch, stage, footer }) {
   const mine = myOpenTasks(g)
   const turns = model.myGameTurns(g)
   const view = { g, ch: !stage && !planner && !games ? ch : null, stage }
+  const on = (id) => model.appOn(g, id)
+  const missing = APPS.filter(a => !on(a.id))
+  const canAddApps = missing.length > 0 && model.isMod(g, model.me.key) && !g.kickedMe
   return html`
     <aside class="sidebar">
       <header class="group-header" onClick=${() => setMenu(!menu)}>
@@ -163,29 +168,35 @@ export function Sidebar ({ g, ch, stage, footer }) {
       ${menu && html`<${GroupMenu} g=${g} onClose=${() => setMenu(false)} />`}
       <div class="channels" onDragEnd=${clearMarks}>
         ${model.canInvite(g) && html`<button class="invite-cta" onClick=${() => model.openModal('invite', { gid: g.id })}><${Icon} name="userPlus" size=${16} /> Invite friends</button>`}
+        ${on('calendar') && html`
         <button class="channel planner-link ${planner === 'calendar' ? 'active' : ''}" onClick=${() => model.openPlanner(g.id, 'calendar')}>
           <${Icon} name="calendar" size=${18} class="dim" /><span class="ch-name">Calendar</span>
           ${today > 0 && html`<span class="soft-badge" title="Events today">${today} today</span>`}
-        </button>
+        </button>`}
+        ${on('tasks') && html`
         <button class="channel planner-link ${planner === 'tasks' ? 'active' : ''}" onClick=${() => model.openPlanner(g.id, 'tasks')}>
           <${Icon} name="tasks" size=${18} class="dim" /><span class="ch-name">Tasks</span>
           ${mine > 0 && html`<span class="soft-badge" title="Open tasks assigned to you">${mine}</span>`}
-        </button>
+        </button>`}
+        ${on('games') && html`
         <button class="channel planner-link games-link ${games ? 'active' : ''}" onClick=${() => model.openGames(g.id)}>
           <${Icon} name="chess" size=${18} class="dim" /><span class="ch-name">Games</span>
           ${turns > 0 && html`<span class="soft-badge" title="Games waiting for you">${turns} your move</span>`}
-        </button>
+        </button>`}
+        ${on('docs') && html`
         <button class="channel planner-link docs-link ${model.ui.docs?.gid === g.id ? 'active' : ''}" onClick=${() => model.openDocs(g.id)}>
           <${Icon} name="focus" size=${18} class="dim" /><span class="ch-name">Focus docs</span>
           ${docsLive(g) > 0 && html`<span class="soft-badge" title="Documents someone is writing in right now">${docsLive(g)} live</span>`}
-        </button>
+        </button>`}
+        ${canAddApps && html`
+          <button class="add-folder-hint add-app-hint" title=${'Add ' + missing.map(a => a.name).join(', ')} onClick=${() => model.openModal('apps', { gid: g.id })}><${Icon} name="apps" size=${15} /> Add apps</button>`}
         <${SectionHead} g=${g} kind="text" label="Text channels" />
         ${tree.text.map(c => html`<${TextRow} key=${c.id} view=${view} c=${c} />`)}
         <${SectionHead} g=${g} kind="voice" label="Voice channels" />
         ${tree.voice.map(c => html`<${VoiceRow} key=${c.id} view=${view} c=${c} />`)}
         ${tree.folders.map(node => html`<${FolderBlock} key=${node.f.id} view=${view} node=${node} depth=${0} />`)}
-        ${!tree.folders.length && g.channels.size > 2 && html`
-          <button class="add-folder-hint" onClick=${() => model.openModal('folder', { gid: g.id })}><${Icon} name="folderPlus" size=${15} /> Create a folder</button>`}
+        ${!g.kickedMe && html`
+          <button class="add-folder-hint" onClick=${() => model.openModal('folder', { gid: g.id })}><${Icon} name="folderPlus" size=${15} /> ${tree.folders.length ? 'New folder' : 'Create a folder'}</button>`}
       </div>
       ${footer}
     </aside>`
@@ -218,6 +229,7 @@ function FolderBlock ({ view, node, depth }) {
         <span class="folder-name">${f.name}</span>
         <span class="folder-tools" onClick=${(e) => e.stopPropagation()}>
           <button class="icon-btn small" title="Create channel in this folder" onClick=${() => model.openModal('channel', { gid: g.id, kind: 'text', folder: f.id })}><${Icon} name="plus" size=${15} /></button>
+          ${depth + 1 < MAX_FOLDER_DEPTH && html`<button class="icon-btn small" title="Create a folder inside" onClick=${() => model.openModal('folder', { gid: g.id, parent: f.id })}><${Icon} name="folderPlus" size=${14} /></button>`}
           <button class="icon-btn small" title="Edit folder" onClick=${() => model.openModal('folder', { gid: g.id, id: f.id })}><${Icon} name="settings" size=${13} /></button>
         </span>
       </div>
@@ -271,7 +283,8 @@ function VoiceRow ({ view, c, folder = null }) {
         const watches = (st.watch || []).filter(w => keys.includes(w))
         const viewers = st.screen ? viewersOf(g, c.id, k).length : 0
         return html`
-          <div key=${k} class="voice-user ${voice.speaking.has(k) ? 'speaking' : ''}" onContextMenu=${(e) => openMemberMenu(e, g, k)} title="Right-click for options">
+          <div key=${k} class="voice-user ${voice.speaking.has(k) ? 'speaking' : ''}" onClick=${(e) => clickVoiceUser(e, g, c, k, st)} onContextMenu=${(e) => openMemberMenu(e, g, k)}
+            title=${st.screen ? (me ? 'Show your stream' : `Watch ${model.memberName(g, k)}'s stream`) : 'Profile · right-click for options'}>
             <${Avatar} name=${model.memberName(g, k)} color=${model.memberColor(g, k)} src=${model.memberAvatar(g, k)} size=${22} speaking=${voice.speaking.has(k)} />
             <span class="vu-name">${model.memberName(g, k)}</span>
             ${watches.length > 0 && html`<span class="vu-watch" title=${'Watching ' + watches.map(w => w === model.me.key ? 'your' : model.memberName(g, w) + "'s").join(', ') + ' stream'}><${Icon} name="eye" size=${13} /></span>`}
@@ -281,6 +294,22 @@ function VoiceRow ({ view, c, folder = null }) {
           </div>`
       })}
     </div>`
+}
+
+// Clicking someone in a voice channel: their stream if they share their screen (joining the
+// channel first if needed), otherwise their profile card
+async function clickVoiceUser (e, g, c, k, st) {
+  if (!st.screen) return openMemberMenu(e, g, k)
+  model.ui.stage = { gid: g.id, ch: c.id, focus: { id: k + ':screen', n: Date.now() } }
+  model.emit()
+  if (k === model.me.key) return
+  if (!voice.inChannel(g.id, c.id)) {
+    if (g.kickedMe) return
+    await act(() => voice.join(g.id, c.id))
+    if (!voice.inChannel(g.id, c.id)) return
+  }
+  voice.watchScreen(k)
+  model.emit()
 }
 
 // For the channel / folder modals: every folder with its path, for a "Folder" picker

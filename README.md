@@ -12,9 +12,10 @@ directly between your computers, encrypted end to end.
 |---|---|---|
 | Text channels, replies, edits, reactions, @mentions, markdown | ✅ | ✅ |
 | Threads (side panel, "also send to channel", follow + unread) | ✅ | ✅ |
+| Apps a group adds when it wants them: Calendar, Tasks, Games, Focus docs | ✅ | ❌ |
 | Shared calendar (RSVP, reminders) and task board per group / private chat | ✅ | ❌ |
 | Folders for channels (nested up to 3 levels, drag and drop) | ✅ | one level (categories) |
-| Chess in any channel or private chat, with or without a clock | ✅ | via Activities |
+| Chess in any channel or private chat, with or without a clock, or against the computer (3 levels) | ✅ | via Activities |
 | Texas hold'em poker for 2–8, cards dealt fairly with no dealer to trust | ✅ | via Activities |
 | Polls (one or several answers, optional end time) | ✅ | ✅ |
 | Search (`from:`, `in:`, `has:`, `before:`, `after:`) | ✅ on your PC, also offline | ✅ |
@@ -24,6 +25,7 @@ directly between your computers, encrypted end to end.
 | Account backup with a password, restore on a new PC | ✅ | (account lives on their servers) |
 | One-time invite links, "only admins can invite" | ✅ | ✅ |
 | Emoji picker, `:shortcodes:`, pinned messages, link previews | ✅ | ✅ |
+| Right-click to cut, copy and paste, with spelling suggestions | ✅ | ✅ |
 | Friends, private chats and private calls | ✅ | ✅ |
 | File sharing | ✅ any size, sent directly | 10 MB limit |
 | Code and markdown files | ✅ previewed with syntax highlighting | ✅ |
@@ -91,10 +93,21 @@ Tips:
 - Hover a message → **Reply in thread**. Thread replies stay out of the channel (tick
   *Also send to #channel* to post one in both). You get notified about threads you started or
   replied in, and when someone @mentions you.
-- **Calendar** and **Tasks** are at the top of every group's channel list (and in the header of a
-  private chat). Events have a time, place, details, RSVPs and a desktop reminder; tasks move
-  between *To do / Doing / Done* by drag and drop and have an assignee, a due date and a checklist.
-  Everyone in the group sees and can edit them, also offline, like messages.
+- **Apps**: a new group is just channels. The owner or an admin adds *Calendar*, *Tasks*, *Games*
+  and *Focus docs* with **Add apps** in the channel list (or group menu → *Apps*); they then show
+  at the top of everyone's channel list. Removing an app only hides it: its events, tasks, games
+  and documents come back when it's added again. Private chats always have all of them, in the header.
+- **Calendar** and **Tasks**: events have a time, place, details, RSVPs and a desktop reminder;
+  tasks move between *To do / Doing / Done* by drag and drop and have an assignee, a due date and a
+  checklist. Everyone in the group sees and can edit them, also offline, like messages.
+- **Chess against the computer**: in *New game*, pick *The computer* as the opponent (or
+  *Computer* in a private chat) and *Easy*, *Medium* or *Hard*. Your app plays its moves, so the
+  game goes on whenever you're online, and others in the channel can watch.
+- Right-click selected text to **copy** it, or a text box to **cut / copy / paste** (with spelling
+  suggestions for underlined words); right-click a link or picture to copy it.
+- In a call, click **Voice connected** (bottom left) to get back to the call from any channel.
+  Click someone's **name in a voice channel** while they share their screen to watch it. You hear
+  a short tone when someone in your call starts or stops sharing.
 - Type `:` and a name (`:fire`) for emoji. Hover a message to **pin** it; pins are in the 📌 menu.
 - **Search** with `Ctrl+F` (or `/search`). Narrow it down with `from:bob`, `in:#general`,
   `has:image|video|file|link|poll|game`, `before:2026-05-01` and `after:`.
@@ -213,7 +226,11 @@ Tips:
   stalemate, repetition, 50 moves, insufficient material), so an illegal move, or a move by
   someone not playing, is simply ignored. If both players' apps sent a move for the same turn, the
   one signed first counts. With a clock, each app measures its own player's thinking time, so the
-  clocks work even when your PCs' times differ.
+  clocks work even when your PCs' times differ. Against the computer, the game names no second
+  player: its creator's app searches a move (alpha-beta, in a Web Worker) and signs it, and every
+  app accepts the creator's moves for both sides of that one game.
+- **Apps** are a `group.settings` field like the invite and Claude settings: the newest value set by
+  the owner or an admin wins. Apps from before 0.7 ignore it and keep showing everything.
 - **@claude** runs on the asker's PC: their app sends that chat's recent messages and any pictures
   or text files in their message to Anthropic with **their own API key**, shows the answer to
   everyone online while it's being written, and posts it as a signed message marked as Claude's.
@@ -384,11 +401,14 @@ src/main/          Electron main process
   updater.js       self-update from GitHub releases
   framing.js       length-prefixed JSON/binary frames
   main.js          window, IPC, custom protocols, opendiscord:// links, screen-capture picker
+  contextmenu.js   the right-click menu (copy, paste, spelling, links)
 src/preload/       the narrow API the UI is allowed to call
 src/renderer/      UI (Preact + htm, no build step)
   lib/model.js     derives channels/messages/threads/reactions/pins/roles/events/tasks from ops
   lib/voice.js     WebRTC mesh, codecs, bitrates, speaking detection, moderation, stats, fallback path
   lib/poker.js     hand evaluator and the poker rules every app replays; lib/pokerplay.js deals
+  lib/chessbot.js  the chess computer (lib/chessbotplay.js plays its moves, in chessbot-worker.js)
+  lib/apps.js      the apps a group can add
   lib/claudelog.js what Claude may read; lib/search.js search filters
   lib/presence.js  status and auto-away; lib/sounds.js join/leave tones and soundboard playback
   lib/denoise.js   RNNoise noise suppression (AudioWorklet: lib/rnnoise-worklet.js)

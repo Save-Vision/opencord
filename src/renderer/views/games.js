@@ -3,7 +3,8 @@ import { model, act, append, rid, fmtStamp } from '../lib/core.js'
 import { DM_TEXT } from '../lib/model.js'
 import { Icon } from '../lib/icons.js'
 import { START, fromFen, play, findMove, legalMoves, inCheck, sqName, colorOf, capturedPieces } from '../lib/chess.js'
-import { TIME_CONTROLS, tcLabel, clockLeft, moveLeft, winnerOf, REASONS } from '../lib/games.js'
+import { TIME_CONTROLS, tcLabel, clockLeft, moveLeft, winnerOf, REASONS, BOT } from '../lib/games.js'
+import { BOT_LEVELS, botLevelName } from '../lib/chessbot.js'
 import { Avatar } from './chat.js'
 import { Modal } from './modals.js'
 import { PokerCard, PokerTable, PokerOptions, pokerStatus, pokerRowInfo } from './poker.js'
@@ -14,7 +15,15 @@ import { playTone } from '../lib/sounds.js'
 const GLYPH = { k: '♚', q: '♛', r: '♜', b: '♝', n: '♞', p: '♟' }
 const glyph = (pc) => GLYPH[pc.toLowerCase()] + '︎'
 
-const nameOf = (g, key) => key ? (key === model.me.key ? 'You' : model.memberName(g, key)) : 'Anyone'
+const nameOf = (g, key) => key ? (key === model.me.key ? 'You' : pName(g, key)) : 'Anyone'
+// A player's name: a member, or the computer
+const pName = (g, key) => key === BOT ? 'Computer' : model.memberName(g, key)
+// What the game is played with: the clock, or the computer's level
+const gameKind = (st) => st.info.bot ? 'vs computer · ' + botLevelName(st.info.bot) : tcLabel(st.info.tc)
+
+export function BotAvatar ({ size = 30 }) {
+  return html`<div class="avatar bot-avatar" style=${{ width: size + 'px', height: size + 'px' }}><${Icon} name="bot" size=${Math.round(size * 0.6)} /></div>`
+}
 const sideOf = (st, key) => key && key === st.white ? 'w' : key && key === st.black ? 'b' : null
 
 // "Bob won by checkmate", "Draw by agreement", "White to move"
@@ -30,9 +39,10 @@ export function gameStatus (g, st) {
     if (st.reason === 'declined') return `${model.memberName(g, st.info.opp)} declined`
     if (st.result === '1/2-1/2') return 'Draw by ' + REASONS[st.reason]
     const w = winnerOf(st)
-    return (w === model.me.key ? 'You won' : model.memberName(g, w) + ' won') + ' by ' + REASONS[st.reason]
+    return (w === model.me.key ? 'You won' : pName(g, w) + ' won') + ' by ' + REASONS[st.reason]
   }
   const mover = st.pos.turn === 'w' ? st.white : st.black
+  if (mover === BOT) return st.by === model.me.key ? 'Computer is thinking…' : 'Computer to move'
   return mover === model.me.key ? 'Your move' : `${model.memberName(g, mover)} to move`
 }
 
@@ -75,7 +85,7 @@ export function GameCard ({ g, m }) {
     <div class="game-card ${model.isMyTurn(st) ? 'your-turn' : ''}" onClick=${open}>
       <${MiniBoard} pos=${st.pos} flipped=${mine === 'b'} last=${last} size=${112} />
       <div class="gc-info">
-        <div class="gc-kind"><${Icon} name="chess" size=${14} /> Chess · ${tcLabel(st.info.tc)}</div>
+        <div class="gc-kind"><${Icon} name=${st.info.bot ? 'bot' : 'chess'} size=${14} /> Chess · ${gameKind(st)}</div>
         <b class="gc-title">${title(g, st)}</b>
         <span class="gc-status ${st.status}">${gameStatus(g, st)}</span>
         ${st.status === 'active' && st.plies.length > 0 && html`<small class="muted">${Math.ceil(st.plies.length / 2)} move${st.plies.length > 2 ? 's' : ''} · last ${last.san}</small>`}
@@ -153,7 +163,7 @@ function GameRow ({ g, x }) {
       <div class="gr-info">
         <b>${title(g, st)}</b>
         <span class="gc-status ${st.status}">${gameStatus(g, st)}</span>
-        <small class="muted">${tcLabel(st.info.tc)}${!g.dm && ch ? ' · #' + ch.name : ''} · ${fmtStamp(x.last)}</small>
+        <small class="muted">${gameKind(st)}${!g.dm && ch ? ' · #' + ch.name : ''} · ${fmtStamp(x.last)}</small>
       </div>
     </button>`
 }
@@ -247,8 +257,9 @@ function GameBoardView ({ g, id }) {
     const ok = await act(() => append(g.id, 'msg', {
       id: nid,
       ch: g.games.get(id).ch,
-      text: `♟ ${model.me.name} wants a rematch with @${model.memberName(g, opp)}`,
-      game: { kind: 'chess', side, opp, tc: st.info.tc }
+      ...(st.info.bot
+        ? { text: `♟ ${model.me.name} plays the computer again (${botLevelName(st.info.bot)})`, game: { kind: 'chess', side, opp: model.me.key, bot: st.info.bot } }
+        : { text: `♟ ${model.me.name} wants a rematch with @${model.memberName(g, opp)}`, game: { kind: 'chess', side, opp, tc: st.info.tc } })
     }))
     if (ok) model.openGame(g.id, nid)
   }
@@ -259,11 +270,13 @@ function GameBoardView ({ g, id }) {
     const ahead = side === 'w' ? score : -score
     return html`
       <div class="player-strip ${st.status === 'active' && st.pos.turn === side ? 'to-move' : ''}">
-        ${key
-          ? html`<${Avatar} name=${model.memberName(g, key)} color=${model.memberColor(g, key)} src=${model.memberAvatar(g, key)} size=${30} dot=${key === me || g.online.has(key) ? 'online' : 'offline'} />`
+        ${key === BOT
+          ? html`<${BotAvatar} size=${30} />`
+          : key
+          ? html`<${Avatar} name=${model.memberName(g, key)} color=${model.memberColor(g, key)} src=${model.memberAvatar(g, key)} size=${30} dot=${model.presence(g, key)} />`
           : html`<div class="seat-empty"><${Icon} name="userPlus" size=${16} /></div>`}
         <div class="ps-name">
-          <b>${key ? model.memberName(g, key) : 'Free seat'}${key === me ? html` <small class="muted">(you)</small>` : ''}</b>
+          <b>${key ? pName(g, key) : 'Free seat'}${key === me ? html` <small class="muted">(you)</small>` : key === BOT ? html` <small class="muted">${botLevelName(st.info.bot)}</small>` : ''}</b>
           <span class="captured">${lost[side === 'w' ? 'b' : 'w'].map((pc, i) => html`<i key=${i} class=${colorOf(pc)}>${glyph(pc)}</i>`)}${ahead > 0 ? html`<small>+${ahead}</small>` : ''}</span>
         </div>
         ${st.clock && html`<div class="clock ${st.clock.running === side ? 'running' : ''} ${left != null && left < 20000 ? 'low' : ''}">${fmtClock(left)}</div>`}
@@ -276,7 +289,7 @@ function GameBoardView ({ g, id }) {
         <button class="icon-btn" title="All games" onClick=${() => model.openGames(g.id)}><${Icon} name="chevronLeft" /></button>
         <${Icon} name="chess" size=${20} class="dim" />
         <h2>${title(g, st)}</h2>
-        <span class="header-note">${tcLabel(st.info.tc)}${!g.dm && ch ? ' · #' + ch.name : ''}</span>
+        <span class="header-note">${gameKind(st)}${!g.dm && ch ? ' · #' + ch.name : ''}</span>
         <div class="spacer" />
         <button class="icon-btn" title="Flip board" onClick=${() => setFlip(!flip)}><${Icon} name="flip" /></button>
       </header>
@@ -311,8 +324,8 @@ function GameBoardView ({ g, id }) {
             <div class="game-actions">
               ${plies < 2
                 ? html`<button class="btn" onClick=${() => send('abort', { n: plies })}>Cancel game</button>`
-                : html`<button class="btn" disabled=${st.drawOffer === me} onClick=${() => send('draw', { n: plies })}>${st.drawOffer === me ? 'Draw offered' : 'Offer draw'}</button>`}
-              <button class="btn danger-ghost" onClick=${() => confirm('Resign?', `${model.memberName(g, opp)} wins the game.`, 'Resign', () => send('resign', { n: plies }))}><${Icon} name="flag" size=${15} /> Resign</button>
+                : !st.info.bot && html`<button class="btn" disabled=${st.drawOffer === me} onClick=${() => send('draw', { n: plies })}>${st.drawOffer === me ? 'Draw offered' : 'Offer draw'}</button>`}
+              <button class="btn danger-ghost" onClick=${() => confirm('Resign?', `${pName(g, opp)} wins the game.`, 'Resign', () => send('resign', { n: plies }))}><${Icon} name="flag" size=${15} /> Resign</button>
               ${oppLeft != null && oppLeft < -3000 && st.clock.running !== mine && html`
                 <button class="btn primary" onClick=${() => send('flag', { n: plies })}>Claim win on time</button>`}
             </div>`}
@@ -415,6 +428,8 @@ export function NewGameModal ({ gid, ch: chId = null, opp: presetOpp = null, kin
   const [kind, setKind] = useState(presetKind === 'poker' ? 'poker' : 'chess')
   const [ch, setCh] = useState(g?.dm ? DM_TEXT : chId || current?.id || texts[0]?.id)
   const [opp, setOpp] = useState(g?.dm ? g.dm : presetOpp)
+  const [level, setLevel] = useState(2)
+  const bot = opp === BOT
   const [side, setSide] = useState('w')
   const [tc, setTc] = useState('none')
   const [poker, setPoker] = useState({ chips: 1000, sb: 10, bb: 20, timer: 30, seats: 6 })
@@ -437,13 +452,15 @@ export function NewGameModal ({ gid, ch: chId = null, opp: presetOpp = null, kin
     if (kind === 'poker') return openTable()
     const id = rid()
     const mySide = side === 'r' ? (crypto.getRandomValues(new Uint8Array(1))[0] & 1 ? 'w' : 'b') : side
-    const oppName = opp ? model.memberName(g, opp) : ''
-    const ok = await act(() => append(gid, 'msg', {
-      id,
-      ch,
-      text: opp ? `♟ ${model.me.name} challenged @${oppName} to a game of chess` : `♟ ${model.me.name} wants to play chess. Who's in?`,
-      game: { kind: 'chess', side: mySide, opp: opp || null, tc: TIME_CONTROLS.find(x => x.id === tc)?.tc || null }
-    }), 'Could not start the game')
+    const oppName = opp && !bot ? model.memberName(g, opp) : ''
+    const ok = await act(() => append(gid, 'msg', bot
+      ? { id, ch, text: `♟ ${model.me.name} is playing chess against the computer (${botLevelName(level)})`, game: { kind: 'chess', side: mySide, opp: model.me.key, bot: level } }
+      : {
+          id,
+          ch,
+          text: opp ? `♟ ${model.me.name} challenged @${oppName} to a game of chess` : `♟ ${model.me.name} wants to play chess. Who's in?`,
+          game: { kind: 'chess', side: mySide, opp: opp || null, tc: TIME_CONTROLS.find(x => x.id === tc)?.tc || null }
+        }), 'Could not start the game')
     if (!ok) return
     model.closeModal()
     model.openGame(gid, id)
@@ -463,11 +480,18 @@ export function NewGameModal ({ gid, ch: chId = null, opp: presetOpp = null, kin
               </select>
             </label>`}
           <${PokerOptions} value=${poker} onChange=${setPoker} />`}
+        ${kind === 'chess' && g.dm && html`
+          <div class="field-label">Opponent</div>
+          <div class="seg-pick two">
+            <button class=${!bot ? 'active' : ''} onClick=${() => setOpp(g.dm)}><${Icon} name="users" size=${16} /> ${model.groupName(g)}</button>
+            <button class=${bot ? 'active' : ''} onClick=${() => setOpp(BOT)}><${Icon} name="bot" size=${16} /> Computer</button>
+          </div>`}
         ${kind === 'chess' && !g.dm && html`
           <label>Opponent
             <select value=${opp || ''} onChange=${(e) => setOpp(e.target.value || null)}>
               <option value="">Anyone in ${model.groupName(g)} (first to join)</option>
               ${others.map(m => html`<option value=${m.key}>${model.memberName(g, m.key)}</option>`)}
+              <option value=${BOT}>The computer</option>
             </select>
           </label>
           <label>Post in
@@ -481,19 +505,28 @@ export function NewGameModal ({ gid, ch: chId = null, opp: presetOpp = null, kin
           ${[['w', 'White', '♔'], ['b', 'Black', '♚'], ['r', 'Random', '?']].map(([v, label, icon]) => html`
             <button key=${v} class=${side === v ? 'active' : ''} onClick=${() => setSide(v)}><span class="seg-icon">${icon}</span>${label}</button>`)}
         </div>
-        <div class="field-label">Clock</div>
-        <div class="tc-pick">
-          ${TIME_CONTROLS.map(x => html`
-            <button key=${x.id} class=${tc === x.id ? 'active' : ''} onClick=${() => setTc(x.id)}><b>${x.label}</b><small>${x.hint}</small></button>`)}
-        </div>
-        <p class="hint">${tc === 'none'
-          ? 'Without a clock you can take as long as you like. The game waits while you are offline.'
-          : 'Each app measures its own player\'s time, so clocks work even when your PCs\' times differ.'}</p>`}
+        ${bot
+          ? html`
+            <div class="field-label">Strength</div>
+            <div class="tc-pick">
+              ${BOT_LEVELS.map(x => html`
+                <button key=${x.id} class=${level === x.id ? 'active' : ''} onClick=${() => setLevel(x.id)}><b>${x.name}</b><small>${x.hint}</small></button>`)}
+            </div>
+            <p class="hint">Your app plays the computer's moves, so the game goes on whenever you're online. Everyone in the channel can watch.</p>`
+          : html`
+            <div class="field-label">Clock</div>
+            <div class="tc-pick">
+              ${TIME_CONTROLS.map(x => html`
+                <button key=${x.id} class=${tc === x.id ? 'active' : ''} onClick=${() => setTc(x.id)}><b>${x.label}</b><small>${x.hint}</small></button>`)}
+            </div>
+            <p class="hint">${tc === 'none'
+              ? 'Without a clock you can take as long as you like. The game waits while you are offline.'
+              : 'Each app measures its own player\'s time, so clocks work even when your PCs\' times differ.'}</p>`}`}
       </div>
       <footer>
         <div class="spacer" />
         <button class="btn" onClick=${() => model.closeModal()}>Cancel</button>
-        <button class="btn primary" disabled=${!ch} onClick=${start}>${kind === 'poker' ? 'Open table' : opp ? 'Send challenge' : 'Start game'}</button>
+        <button class="btn primary" disabled=${!ch} onClick=${start}>${kind === 'poker' ? 'Open table' : opp && !bot ? 'Send challenge' : 'Start game'}</button>
       </footer>
     <//>`
 }
