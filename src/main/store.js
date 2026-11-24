@@ -87,6 +87,12 @@ const DEFAULT_SETTINGS = {
   },
   // Make previews for links you send (your app fetches the page; friends' apps never do)
   linkPreviews: true,
+  // Look: 'standard', 'xp', 'glass' or 'oled' (renderer/lib/themes.js); the Glass theme's
+  // moving background can be switched off
+  theme: 'standard',
+  animatedBg: true,
+  // Order and widths of the floating panels (renderer/lib/layout.js); null = default
+  layout: null,
   screen: { preset: '1080p60', contentHint: 'motion', codec: 'auto', audio: false },
   volumes: {},
   // Remove files your friends sent after this many days (0 = keep). Your own files always

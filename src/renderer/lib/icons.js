@@ -80,23 +80,93 @@ const ICONS = {
   ticket: ['M3 7a2 2 0 0 0 2-2h14a2 2 0 0 0 2 2v3a2 2 0 0 0 0 4v3a2 2 0 0 0-2 2H5a2 2 0 0 0-2-2v-3a2 2 0 0 0 0-4z', 'M13 5v2', 'M13 11v2', 'M13 17v2']
 }
 
+// Each theme draws the same shapes its own way (lib/themes.js picks the style):
+//   line  2 px strokes in the text colour (Standard)
+//   thin  1.6 px hairlines, like system symbols (Glass)
+//   neon  bold strokes with a soft glow (OLED; the glow is CSS, see themes.css)
+//   xp    glossy colour icons: a dark outline under a top-lit gradient, colour per meaning
+let style = 'line'
+export function setIconStyle (s) { style = s || 'line' }
+export const iconStyle = () => style
+
+const STROKE = { line: 2, thin: 1.6, neon: 2.3 }
+
+// XP colours: what the icon is about decides its colour, like the old Windows icon sets did
+const XP_HUE = {
+  green: ['mic', 'phone', 'check', 'play', 'speaker', 'headphones', 'camera', 'music', 'shield', 'shieldPlain', 'plus', 'userPlus', 'signal', 'download'],
+  yellow: ['folder', 'folderPlus', 'crown', 'zap', 'smile', 'lock', 'ticket', 'archive', 'clip', 'poll', 'cards', 'pin', 'inbox'],
+  red: ['micOff', 'headphonesOff', 'cameraOff', 'volumeX', 'x', 'trash', 'leave', 'userX', 'stop', 'alert', 'flag', 'calendar'],
+  gray: ['settings', 'edit', 'pencilLine', 'chess', 'clock', 'more', 'chevronDown', 'chevronRight', 'chevronLeft', 'flip', 'code'],
+  purple: ['moon', 'sparkle', 'at']
+}
+const HUE_OF = {}
+for (const [hue, names] of Object.entries(XP_HUE)) for (const n of names) HUE_OF[n] = hue
+// [top, bottom, outline]
+const XP_COLORS = {
+  blue: ['#9cc8ff', '#2160d8', '#0a2a73'],
+  green: ['#b6f08a', '#2f9a1c', '#11470a'],
+  yellow: ['#ffe58a', '#e09a12', '#6b4300'],
+  red: ['#ffb0a0', '#d8321c', '#6a0f05'],
+  gray: ['#f2f2ee', '#8a8d93', '#34373d'],
+  purple: ['#e2c2ff', '#7a3fd0', '#33115e']
+}
+
+// The gradients live once in the page; every XP icon points at them
+function ensureXpDefs () {
+  if (typeof document === 'undefined' || document.getElementById('xp-icon-defs')) return
+  const NS = 'http://www.w3.org/2000/svg'
+  const svg = document.createElementNS(NS, 'svg')
+  svg.id = 'xp-icon-defs'
+  svg.setAttribute('width', '0')
+  svg.setAttribute('height', '0')
+  svg.setAttribute('aria-hidden', 'true')
+  svg.style.position = 'absolute'
+  const defs = document.createElementNS(NS, 'defs')
+  for (const [hue, [top, bottom]] of Object.entries(XP_COLORS)) {
+    const g = document.createElementNS(NS, 'linearGradient')
+    g.id = 'xpg-' + hue
+    // user space: straight lines have no height, so a bounding-box gradient would vanish
+    g.setAttribute('gradientUnits', 'userSpaceOnUse')
+    for (const [k, v] of [['x1', 0], ['y1', 2], ['x2', 0], ['y2', 22]]) g.setAttribute(k, v)
+    for (const [off, c] of [['0', top], ['0.55', bottom], ['1', bottom]]) {
+      const st = document.createElementNS(NS, 'stop')
+      st.setAttribute('offset', off)
+      st.setAttribute('stop-color', c)
+      g.appendChild(st)
+    }
+    defs.appendChild(g)
+  }
+  svg.appendChild(defs)
+  document.body.appendChild(svg)
+}
+
+const shape = (p, i, extra) => Array.isArray(p)
+  ? h('circle', { key: i, cx: p[0], cy: p[1], r: p[2], ...extra })
+  : h('path', { key: i, d: p, ...extra })
+
 export function Icon ({ name, size = 20, class: cls = '', title }) {
   const parts = ICONS[name] || []
-  return h('svg', {
-    class: 'icon ' + cls,
+  const base = {
+    class: `icon icon-${style} ${cls}`,
     width: size,
     height: size,
     viewBox: '0 0 24 24',
     fill: 'none',
-    stroke: 'currentColor',
-    'stroke-width': 2,
     'stroke-linecap': 'round',
     'stroke-linejoin': 'round',
     'aria-hidden': title ? undefined : 'true'
-  }, [
+  }
+  if (style === 'xp') {
+    ensureXpDefs()
+    const hue = HUE_OF[name] || 'blue'
+    return h('svg', base, [
+      title ? h('title', null, title) : null,
+      h('g', { key: 'o', stroke: XP_COLORS[hue][2], 'stroke-width': 3.6 }, parts.map((p, i) => shape(p, i))),
+      h('g', { key: 'f', stroke: `url(#xpg-${hue})`, 'stroke-width': 2 }, parts.map((p, i) => shape(p, i)))
+    ])
+  }
+  return h('svg', { ...base, stroke: 'currentColor', 'stroke-width': STROKE[style] || 2 }, [
     title ? h('title', null, title) : null,
-    ...parts.map((p, i) => Array.isArray(p)
-      ? h('circle', { key: i, cx: p[0], cy: p[1], r: p[2] })
-      : h('path', { key: i, d: p }))
+    ...parts.map((p, i) => shape(p, i))
   ])
 }

@@ -19,11 +19,17 @@ import { AccountNote } from './views/account.js'
 import { SoundboardButton, onRemoteSound } from './views/soundboard.js'
 import { announceStatus, setMyStatus, startPresence, STATUS_LABEL } from './lib/presence.js'
 import { startPoker } from './lib/pokerplay.js'
+import { applyTheme, themeInfo } from './lib/themes.js'
+import { setIconStyle } from './lib/icons.js'
+import { DockLayout } from './views/dock.js'
 
 // ---------------------------------------------------------------- shell
 
 function App () {
   useModel()
+  const theme = applyTheme(model.settings)
+  setIconStyle(themeInfo(theme).icons)
+  document.documentElement.dataset.focus = model.ui.focused === false ? 'off' : 'on'
   const g = model.currentGroup()
   const home = model.ui.gid === HOME || !!g?.dm
   const stage = model.ui.stage && g && model.ui.stage.gid === g.id ? g.channels.get(model.ui.stage.ch) : null
@@ -43,16 +49,15 @@ function App () {
     api.setUnread(total)
   })
 
-  if (!model.me.name) return html`<${TitleBar} /><${Onboarding} /><${Modals} /><${Toasts} />`
+  if (!model.me.name) return html`<${Backdrop} /><${TitleBar} /><${Onboarding} /><${Modals} /><${Toasts} />`
 
   const footer = html`${voice.active && voice.active.gid && html`<${VoicePanel} />`}<${UserPanel} />`
-  return html`
-    <${TitleBar} g=${g} home=${home} />
-    <div class="app">
-      <${Rail} home=${home} />
-      ${home
+  const blocks = {
+    rail: html`<${Rail} home=${home} />`,
+    nav: home
         ? html`<${HomeSidebar} g=${g} footer=${footer} />`
-        : g ? html`<${Sidebar} g=${g} ch=${ch} stage=${stage} footer=${footer} />` : html`<aside class="sidebar"><div class="channels" />${footer}</aside>`}
+        : g ? html`<${Sidebar} g=${g} ch=${ch} stage=${stage} footer=${footer} />` : html`<aside class="sidebar"><div class="channels" />${footer}</aside>`,
+    main: html`
       <main class="main">
         <${AccountNote} />
         ${home && !g
@@ -68,16 +73,27 @@ function App () {
                 : ch
                   ? html`<${ChatView} g=${g} ch=${ch} />`
                   : html`<${Syncing} g=${g} />`}
-      </main>
-      ${search
-        ? html`<${SearchPanel} g=${g} />`
-        : side && (thread ? html`<${ThreadPanel} key=${model.ui.thread.id} g=${g} />` : g.dm ? html`<${DmProfile} g=${g} />` : html`<${Members} g=${g} />`)}
-    </div>
+      </main>`,
+    side: search
+      ? html`<${SearchPanel} g=${g} />`
+      : side && (thread ? html`<${ThreadPanel} key=${model.ui.thread.id} g=${g} />` : g.dm ? html`<${DmProfile} g=${g} />` : html`<${Members} g=${g} />`)
+  }
+  return html`
+    <${Backdrop} />
+    <${TitleBar} g=${g} home=${home} />
+    <${DockLayout} blocks=${blocks} />
     <${CallBanner} />
     <${MemberMenu} />
     <${Modals} />
     <${UpdateRequired} />
     <${Toasts} />`
+}
+
+// The moving colours behind the Glass theme's frosted panels (hidden in the other themes).
+// Four soft blobs that only move with transforms, so the GPU does the work; paused when the
+// window is in the background, switched off in Settings > Appearance or by reduced motion.
+function Backdrop () {
+  return html`<div class="backdrop" aria-hidden="true"><i /><i /><i /><i /></div>`
 }
 
 function TitleBar ({ g, home }) {
@@ -285,6 +301,7 @@ async function boot () {
   const init = await api.init()
   model.me = init.me
   model.settings = init.settings
+  applyTheme(model.settings)
   model.platform = init.platform
   model.profile = init.profile
   model.version = init.version

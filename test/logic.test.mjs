@@ -582,3 +582,67 @@ test('status and soundboard: what friends announce, who may remove a sound', () 
   m.applyOps('g1', [raw('sound.delete', A, { id: 's3' })]) // the owner may
   assert.deepStrictEqual(m.soundsOf(g).map(s => s.id), ['s1'])
 })
+
+// ---- 0.6.1: floating panels and themes ----
+const layout = await import('../src/renderer/lib/layout.js')
+const themes = await import('../src/renderer/lib/themes.js')
+
+test('layout: broken or missing layouts fall back to the default order', () => {
+  assert.deepStrictEqual(layout.normalizeLayout(null), { order: ['rail', 'nav', 'main', 'side'], w: {} })
+  assert.deepStrictEqual(layout.normalizeLayout({ order: ['main', 'rail'] }).order, layout.DEFAULT_ORDER)
+  assert.deepStrictEqual(layout.normalizeLayout({ order: ['rail', 'rail', 'main', 'side'] }).order, layout.DEFAULT_ORDER)
+  assert.deepStrictEqual(layout.normalizeLayout({ order: ['side', 'main', 'nav', 'rail'] }).order, ['side', 'main', 'nav', 'rail'])
+  // widths are clamped, junk and unknown blocks are dropped
+  assert.deepStrictEqual(layout.normalizeLayout({ w: { nav: 9999, side: 'x', main: 500, rail: 10 } }).w, { nav: 420 })
+  assert.deepStrictEqual(layout.normalizeLayout({ w: { nav: 10, side: 301.6 } }).w, { nav: 200, side: 302 })
+})
+
+test('layout: moving a block to the left or right of another', () => {
+  const o = layout.DEFAULT_ORDER
+  assert.deepStrictEqual(layout.moveBlock(o, 'side', 'nav', 'before'), ['rail', 'side', 'nav', 'main'])
+  assert.deepStrictEqual(layout.moveBlock(o, 'rail', 'side', 'after'), ['nav', 'main', 'side', 'rail'])
+  assert.deepStrictEqual(layout.moveBlock(o, 'main', 'rail', 'before'), ['main', 'rail', 'nav', 'side'])
+  // dropping next to where it already is changes nothing
+  assert.ok(layout.sameOrder(layout.moveBlock(o, 'nav', 'main', 'before'), o))
+  assert.ok(layout.sameOrder(layout.moveBlock(o, 'nav', 'nav', 'after'), o))
+  assert.ok(layout.sameOrder(layout.moveBlock(o, 'nav', 'nope', 'after'), o))
+  // the input is never changed
+  assert.deepStrictEqual(o, ['rail', 'nav', 'main', 'side'])
+})
+
+test('layout: drop side and resize edge', () => {
+  const rect = { left: 100, width: 200 }
+  assert.strictEqual(layout.dropSide(rect, 150), 'before')
+  assert.strictEqual(layout.dropSide(rect, 250), 'after')
+  assert.strictEqual(layout.resizeEdge(layout.DEFAULT_ORDER, 'nav'), 'right')
+  assert.strictEqual(layout.resizeEdge(layout.DEFAULT_ORDER, 'side'), 'left')
+  assert.strictEqual(layout.resizeEdge(['side', 'main', 'nav', 'rail'], 'side'), 'right')
+  assert.strictEqual(layout.resizeEdge(['side', 'main', 'nav', 'rail'], 'nav'), 'left')
+})
+
+test('layout: widths snap to the nearby sizes and stay within limits', () => {
+  assert.strictEqual(layout.snapWidth('nav', 255), 248)
+  assert.strictEqual(layout.snapWidth('nav', 300), 300) // between snaps: stays
+  assert.strictEqual(layout.snapWidth('nav', 1000), 420)
+  assert.strictEqual(layout.snapWidth('nav', 50), 200)
+  assert.strictEqual(layout.snapWidth('side', 412), 420)
+  assert.strictEqual(layout.snapWidth('main', 777), 777) // not resizable
+  // dragging the right edge to the right widens; a left edge widens when dragged left
+  assert.strictEqual(layout.dragWidth(layout.DEFAULT_ORDER, 'nav', 248, 500, 532), 280)
+  assert.strictEqual(layout.dragWidth(layout.DEFAULT_ORDER, 'side', 240, 900, 840), 300)
+  assert.strictEqual(layout.dragWidth(['side', 'rail', 'nav', 'main'], 'side', 240, 300, 360), 300)
+})
+
+test('themes: four themes, unknown ones become Standard, and the page gets the theme', () => {
+  assert.deepStrictEqual(themes.THEME_IDS, ['standard', 'xp', 'glass', 'oled'])
+  assert.strictEqual(themes.normalizeTheme('glass'), 'glass')
+  assert.strictEqual(themes.normalizeTheme('dracula'), 'standard')
+  assert.strictEqual(themes.normalizeTheme(undefined), 'standard')
+  for (const t of themes.THEMES) assert.ok(t.name && t.hint && t.icons, t.id)
+  assert.strictEqual(new Set(themes.THEMES.map(t => t.icons)).size, 4, 'each theme draws its own icons')
+  const doc = { documentElement: { dataset: {} } }
+  assert.strictEqual(themes.applyTheme({ theme: 'oled' }, doc), 'oled')
+  assert.deepStrictEqual(doc.documentElement.dataset, { theme: 'oled', anim: 'on' })
+  themes.applyTheme({ theme: 'nope', animatedBg: false }, doc)
+  assert.deepStrictEqual(doc.documentElement.dataset, { theme: 'standard', anim: 'off' })
+})

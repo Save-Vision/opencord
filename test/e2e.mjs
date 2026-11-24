@@ -6,7 +6,8 @@
 // against a stand-in for the Anthropic API, and checks that a muted mic sends nothing and that
 // forged voice messages can't open a call. Since 0.6: search, profile cards, polls, status,
 // Claude's privacy (it only reads the asker) and replies to Claude, the soundboard, a poker hand,
-// a call over the fallback path, the update-required screen, and restoring a backup.
+// a call over the fallback path, the update-required screen, and restoring a backup. Since 0.6.1:
+// the four themes, moving and resizing the floating panels; Bob uses the XP theme from then on.
 // Screenshots land in test/screenshots/.
 // Run: npm run test:e2e
 import { _electron as electron } from 'playwright-core'
@@ -272,6 +273,82 @@ try {
   await shot(alice, '15-storage')
   await alice.getByRole('button', { name: 'Voice & audio', exact: true }).click()
   console.log('   noise suppression:', await alice.locator('.settings-body select:has(option[value="ai"])').inputValue())
+
+  step('themes: each one changes the whole window and is saved')
+  await alice.getByRole('button', { name: 'Appearance', exact: true }).click()
+  for (const [i, t] of ['xp', 'glass', 'oled', 'standard'].entries()) {
+    await alice.locator(`.theme-card[data-theme-id="${t}"]`).click()
+    await alice.locator(`html[data-theme="${t}"]`).waitFor({ state: 'attached', timeout: 5000 })
+    await alice.locator(`.theme-card.active[data-theme-id="${t}"]`).waitFor()
+    if (await alice.evaluate(() => window.__od.model.settings.theme) !== t) throw new Error('theme not saved: ' + t)
+    const look = await alice.evaluate(() => ({
+      font: getComputedStyle(document.body).fontFamily.split(',')[0],
+      icon: document.querySelector('.user-panel svg.icon')?.getAttribute('class')
+    }))
+    console.log(`   ${t}: font ${look.font}, ${look.icon}`)
+    if (t === 'glass' && !(await alice.locator('.toggle-row', { hasText: 'Moving background' }).isVisible())) throw new Error('Glass should offer the moving background switch')
+    if (t !== 'standard') {
+      await alice.keyboard.press('Escape')
+      await settle(alice)
+      await shot(alice, `${49 + i}-theme-${t}`)
+      await alice.locator('.user-panel button[title="Settings"]').click()
+      await alice.getByRole('button', { name: 'Appearance', exact: true }).click()
+    }
+  }
+  await alice.keyboard.press('Escape')
+  // Bob keeps the XP look for the rest of the run, so every later step also runs in it
+  await bob.locator('.user-panel button[title="Settings"]').click()
+  await bob.getByRole('button', { name: 'Appearance', exact: true }).click()
+  await bob.locator('.theme-card[data-theme-id="xp"]').click()
+  await bob.locator('html[data-theme="xp"]').waitFor({ state: 'attached' })
+  await bob.keyboard.press('Escape')
+
+  step('panels: drag the side panel next to the channels, resize, cancel, reset')
+  const layoutOf = (page) => page.evaluate(() => window.__od.model.settings.layout)
+  const box = (page, sel) => page.locator(sel).boundingBox()
+  const grip = await box(alice, '.dock-side > .dock-grip')
+  const nav = await box(alice, '.dock-nav')
+  await alice.mouse.move(grip.x + grip.width / 2, grip.y + grip.height / 2)
+  await alice.mouse.down()
+  await alice.mouse.move(nav.x + 30, nav.y + nav.height / 2, { steps: 10 })
+  await alice.locator('.dock-nav.drop-before').waitFor({ timeout: 3000 })
+  await alice.locator('.dock-ghost.ok', { hasText: 'left of channels' }).waitFor()
+  await shot(alice, '53-panel-drag')
+  await alice.mouse.up()
+  await alice.waitForFunction(() => window.__od.model.settings.layout?.order?.join() === 'rail,side,nav,main', null, { timeout: 5000 })
+  if (!((await box(alice, '.dock-side')).x < (await box(alice, '.dock-nav')).x)) throw new Error('the side panel should now be left of the channels')
+  // the chat survived the move (same DOM, only the CSS order changed)
+  await alice.locator('.dock-main .composer textarea').waitFor()
+  await settle(alice)
+  await shot(alice, '54-panel-moved')
+  // Escape cancels a drag
+  const grip2 = await box(alice, '.dock-main > .dock-grip')
+  const rail = await box(alice, '.dock-rail')
+  await alice.mouse.move(grip2.x + grip2.width / 2, grip2.y + grip2.height / 2)
+  await alice.mouse.down()
+  await alice.mouse.move(rail.x + 10, rail.y + 200, { steps: 6 })
+  await alice.locator('.dock-rail.drop-before').waitFor({ timeout: 3000 })
+  await alice.keyboard.press('Escape')
+  await alice.mouse.up()
+  await alice.waitForTimeout(300)
+  if ((await layoutOf(alice)).order.join() !== 'rail,side,nav,main') throw new Error('Escape should cancel the move')
+  // resize the channel list: 248 + 30 snaps to 280
+  const edge = await box(alice, '.dock-nav > .dock-resize')
+  await alice.mouse.move(edge.x + edge.width / 2, edge.y + edge.height / 2)
+  await alice.mouse.down()
+  await alice.mouse.move(edge.x + edge.width / 2 + 30, edge.y + edge.height / 2, { steps: 6 })
+  await alice.locator('.dock-size', { hasText: '280 px' }).waitFor({ timeout: 3000 })
+  await alice.mouse.up()
+  await alice.waitForFunction(() => window.__od.model.settings.layout?.w?.nav === 280, null, { timeout: 5000 })
+  if (Math.round((await box(alice, '.dock-nav')).width) !== 280) throw new Error('the channel list should be 280 px wide')
+  // double-click the edge for the default width
+  await alice.locator('.dock-nav > .dock-resize').dblclick()
+  await alice.waitForFunction(() => !window.__od.model.settings.layout?.w?.nav, null, { timeout: 5000 })
+  // reset everything from settings
+  await alice.locator('.user-panel button[title="Settings"]').click()
+  await alice.getByRole('button', { name: 'Appearance', exact: true }).click()
+  await alice.getByRole('button', { name: 'Reset panels' }).click()
+  await alice.waitForFunction(() => window.__od.model.settings.layout?.order?.join() === 'rail,nav,main,side', null, { timeout: 5000 })
   await alice.keyboard.press('Escape')
 
   step('calendar: event with RSVP')

@@ -33,6 +33,8 @@ directly between your computers, encrypted end to end.
 | Webcam | ✅ | ✅ |
 | Moderation: kick, admins, mute for everyone, move between channels | ✅ | ✅ |
 | Profile and group pictures | ✅ synced, visible offline | ✅ |
+| Themes | ✅ Standard, XP Classic, Glass (animated), OLED; each with its own fonts, icons and corners | dark / light |
+| Layout | ✅ floating panels you drag into any order and resize (they snap), like VS Code | fixed |
 | Updates | ✅ automatic, from this repo's GitHub releases | ✅ |
 | Where your data lives | only on your three PCs | Discord's servers |
 | Encryption | end to end, always | calls only; messages readable by Discord |
@@ -112,6 +114,14 @@ Tips:
 - Settings → **Storage** shows what takes up space, removes files friends sent (they can be
   downloaded again), and moves your data (identity, history, files) to another folder or drive.
 - Settings → Privacy → **Link previews** turns off fetching previews for links you send.
+- Settings → **Appearance** picks a **theme**: *Standard* (dark), *XP Classic* (blue title bars,
+  beige windows, bevelled buttons and colourful icons), *Glass* (light, see-through panels over a
+  slowly moving background; it pauses when the window is in the background and can be switched
+  off) or *OLED* (true black with neon colours). Each theme has its own fonts, icons and corners.
+- The window is made of **floating panels** (groups, channels, chat, side panel). Drag the small
+  grip above a panel onto the left or right half of another one to move it there; drag the edge of
+  the channel list or side panel to resize it (it snaps to a few widths, double-click for the
+  default). *Escape* cancels; Settings → Appearance → *Reset panels* puts everything back.
 
 ## How it works
 

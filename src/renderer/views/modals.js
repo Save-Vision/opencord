@@ -18,6 +18,9 @@ import { PollModal } from './polls.js'
 import { AddSoundModal } from './soundboard.js'
 import { BackupModal, RestoreModal, AccountSettings } from './account.js'
 import { folderOptions, folderFits } from './sidebar.js'
+import { THEMES, normalizeTheme } from '../lib/themes.js'
+import { normalizeLayout, sameOrder, DEFAULT_ORDER } from '../lib/layout.js'
+import { BLOCK_LABEL, resetLayout } from './dock.js'
 
 export function Modal ({ title, children, wide = false, onClose = () => model.closeModal() }) {
   useEffect(() => {
@@ -631,13 +634,14 @@ function MicMeter ({ audio }) {
 
 function SettingsModal ({ tab: initialTab = 'profile' }) {
   const [tab, setTab] = useState(initialTab)
-  const tabs = [['profile', 'My profile'], ['account', 'Account & backup'], ['voice', 'Voice & audio'], ['screen', 'Screen share'], ['claude', 'Claude'], ['network', 'Network'], ['storage', 'Storage'], ['privacy', 'Privacy & security'], ['updates', 'Updates']]
+  const tabs = [['profile', 'My profile'], ['appearance', 'Appearance'], ['account', 'Account & backup'], ['voice', 'Voice & audio'], ['screen', 'Screen share'], ['claude', 'Claude'], ['network', 'Network'], ['storage', 'Storage'], ['privacy', 'Privacy & security'], ['updates', 'Updates']]
   return html`
     <${Modal} title="Settings" wide>
       <div class="settings">
         <nav>${tabs.map(([k, label]) => html`<button key=${k} class=${tab === k ? 'active' : ''} onClick=${() => setTab(k)}>${label}</button>`)}</nav>
         <div class="settings-body">
           ${tab === 'profile' && html`<${ProfileSettings} />`}
+          ${tab === 'appearance' && html`<${AppearanceSettings} />`}
           ${tab === 'account' && html`<${AccountSettings} />`}
           ${tab === 'voice' && html`<${VoiceSettings} />`}
           ${tab === 'screen' && html`<${ScreenSettings} />`}
@@ -692,6 +696,41 @@ function ProfileSettings () {
       </select>
     </label>
     <p class="hint">Set your status by clicking your picture at the bottom left. "Appear offline" hides you from friends' lists; your app still syncs messages in the background.</p>`
+}
+
+// A tiny drawing of the window in each theme: rail, channels, chat and side panel
+function ThemePreview ({ id }) {
+  return html`
+    <div class="theme-preview" data-preview=${id} aria-hidden="true">
+      <div class="tp-bar" />
+      <div class="tp-body">
+        <i class="tp-rail" /><i class="tp-nav"><b /><b /><b /></i>
+        <i class="tp-main"><b /><b class="short" /><b /><u /></i><i class="tp-side" />
+      </div>
+    </div>`
+}
+
+function AppearanceSettings () {
+  const cur = normalizeTheme(model.settings.theme)
+  const layout = normalizeLayout(model.settings.layout)
+  const custom = !sameOrder(layout.order, DEFAULT_ORDER) || Object.keys(layout.w).length > 0
+  return html`
+    <h4>Theme</h4>
+    <div class="theme-grid">
+      ${THEMES.map(t => html`
+        <button key=${t.id} class="theme-card ${cur === t.id ? 'active' : ''}" data-theme-id=${t.id} aria-pressed=${cur === t.id} onClick=${() => saveSettings({ theme: t.id })}>
+          <${ThemePreview} id=${t.id} />
+          <span class="theme-name">${t.name}${cur === t.id && html`<${Icon} name="check" size=${14} />`}</span>
+          <small>${t.hint}</small>
+        </button>`)}
+    </div>
+    ${cur === 'glass' && html`<${Toggle} label="Moving background" hint="The colours drift slowly behind the panels. It pauses while the window is in the background; turn it off to save a little battery." checked=${model.settings.animatedBg !== false} onChange=${(v) => saveSettings({ animatedBg: v })} />`}
+    <h4>Panels</h4>
+    <p class="hint">Every part of the window is a floating panel. Drag the small grip above a panel onto the left or right half of another one to move it there, and drag the edge of the channel list or the side panel to resize it (it snaps to a few sizes; double-click the edge for the default).</p>
+    <div class="layout-summary">
+      ${layout.order.map(id => html`<span key=${id} class="ls-${id}">${BLOCK_LABEL[id]}${layout.w[id] ? html` <small>${layout.w[id]} px</small>` : ''}</span>`)}
+    </div>
+    <div class="row"><button class="btn" disabled=${!custom} onClick=${() => resetLayout()}>Reset panels</button></div>`
 }
 
 function VoiceSettings () {

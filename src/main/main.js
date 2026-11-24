@@ -212,19 +212,39 @@ function setVoiceHotkeys (on) {
   }
 }
 
+// Window colours per theme (renderer/lib/themes.js): the background shown while the page
+// loads and the caption buttons Windows draws over the right end of our title bar.
+const THEME_CHROME = {
+  standard: { bg: '#0b0c0f', bar: '#0b0c0f', symbol: '#9aa0aa' },
+  xp: { bg: '#3a6ea5', bar: '#0d4fd0', symbol: '#ffffff' },
+  glass: { bg: '#dfe7f3', bar: '#e7edf6', symbol: '#1d1d1f' },
+  oled: { bg: '#000000', bar: '#000000', symbol: '#f5f5f5' }
+}
+const chrome = () => THEME_CHROME[store?.settings?.theme] || THEME_CHROME.standard
+
+function applyChrome () {
+  if (!win) return
+  const c = chrome()
+  try { win.setBackgroundColor(c.bg) } catch {}
+  if (process.platform !== 'darwin') {
+    try { win.setTitleBarOverlay({ color: c.bar, symbolColor: c.symbol, height: 34 }) } catch {}
+  }
+}
+
 function createWindow () {
   const isMac = process.platform === 'darwin'
+  const c = chrome()
   win = new BrowserWindow({
     width: 1320,
     height: 840,
     minWidth: 960,
     minHeight: 580,
     show: false,
-    backgroundColor: '#0e0f12',
+    backgroundColor: c.bg,
     title: 'OpenDiscord' + (profile ? ` (${profile})` : ''),
     icon: fs.existsSync(ICON) ? ICON : undefined,
     titleBarStyle: 'hidden',
-    titleBarOverlay: isMac ? undefined : { color: '#0e0f12', symbolColor: '#9aa0aa', height: 34 },
+    titleBarOverlay: isMac ? undefined : { color: c.bar, symbolColor: c.symbol, height: 34 },
     trafficLightPosition: isMac ? { x: 14, y: 11 } : undefined,
     webPreferences: {
       preload: path.join(__dirname, '..', 'preload', 'preload.js'),
@@ -496,7 +516,11 @@ function registerIpc () {
     return me
   })
 
-  handle('settings:set', (patch) => store.setSettings(patch))
+  handle('settings:set', (patch) => {
+    const s = store.setSettings(patch)
+    if (patch && 'theme' in patch) applyChrome()
+    return s
+  })
 
   handle('group:create', (name) => {
     const g = store.createGroup(name)
