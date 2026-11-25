@@ -10,7 +10,9 @@
 // the themes, moving and resizing the floating panels. Since 0.6.2: light and dark modes, the
 // Minimal theme, and two people writing in one focus document at once; Bob uses Glass (light)
 // from then on. Since 0.6.3: the live preview, formatting buttons, lists that continue on Enter
-// and checkboxes ticked in the preview.
+// and checkboxes ticked in the preview. Since 0.7: group apps, chess against the computer, more
+// folders, the reaction picker on the last message, watching a stream from the channel list,
+// away in the friend list and hanging up a private call. It also runs on a Mac (⌘ shortcuts).
 // Screenshots land in test/screenshots/.
 // Run: npm run test:e2e
 import { _electron as electron } from 'playwright-core'
@@ -87,6 +89,11 @@ async function launch (name) {
 }
 
 const step = (s) => console.log('▶', s)
+// Keys that differ on a Mac: ⌘ for the app's shortcuts, ⌘+arrows to jump in a text box
+const MAC = process.platform === 'darwin'
+const KEY = MAC
+  ? { mod: 'Meta', lineEnd: 'Meta+ArrowRight', docStart: 'Meta+ArrowUp', docEnd: 'Meta+ArrowDown' }
+  : { mod: 'Control', lineEnd: 'End', docStart: 'Control+Home', docEnd: 'Control+End' }
 // A text channel's row also holds its unread badge, so find it by its name
 const openChannel = (page, name) => page.locator('.channel .ch-name').getByText(name, { exact: true }).click()
 const shot = (page, name) => page.screenshot({ path: path.join(shots, name + '.png') })
@@ -104,6 +111,13 @@ try {
     await page.getByText(`Hey ${name}!`).waitFor()
   }
   await shot(alice, '01-welcome')
+
+  if (MAC) {
+    // the window's traffic lights sit at the top left: the title bar's own content starts after them
+    const left = await alice.locator('.titlebar .brand').evaluate(el => el.getBoundingClientRect().left)
+    console.log('   title bar content starts at x =', Math.round(left))
+    if (left < 70) throw new Error('the title bar content is under the window buttons')
+  }
 
   step('alice creates a group')
   await alice.getByRole('button', { name: 'Create a group' }).click()
@@ -162,7 +176,7 @@ try {
   await shot(alice, '10-emoji-picker')
   await alice.locator('.emoji-panel .ep-emojis button', { hasText: '🚀' }).first().click()
   await alice.locator('.composer textarea').focus()
-  await alice.keyboard.press('End')
+  await alice.keyboard.press(KEY.lineEnd)
   await alice.keyboard.type(' launch :tad')
   await alice.locator('.emoji-suggest button', { hasText: '🎉' }).first().waitFor({ timeout: 5000 })
   await alice.keyboard.press('Enter')
@@ -425,7 +439,7 @@ try {
   await bob.waitForFunction(() => document.querySelector('.focus-text')?.value.includes('we leave on Friday'), null, { timeout: 15000 })
   // both type at the same time: Alice at the end, Bob at the very start
   await bob.locator('.focus-text').click()
-  await bob.keyboard.press('Control+Home')
+  await bob.keyboard.press(KEY.docStart)
   await Promise.all([
     alice.keyboard.type('Alice: I bring the tent.\n', { delay: 25 }),
     bob.keyboard.type('Bob was here first. ', { delay: 25 })
@@ -454,7 +468,7 @@ try {
   await alice.locator('.focus-guide').waitFor() // open by itself the first time
   await alice.locator('.focus-text').evaluate((el) => { const i = el.value.indexOf('Friday'); el.focus(); el.setSelectionRange(i, i + 6) })
   await alice.locator('.ft-btn[data-tool="bold"]').click()
-  await alice.keyboard.press('Control+End')
+  await alice.keyboard.press(KEY.docEnd)
   await alice.keyboard.press('Enter')
   await alice.locator('.ft-btn[data-tool="task"]').click()
   await alice.keyboard.type('tent\nsnacks')
@@ -675,7 +689,7 @@ try {
   await alice.locator('.composer textarea').fill('')
 
   step('search')
-  await bob.keyboard.press('Control+f')
+  await bob.keyboard.press(KEY.mod + '+f')
   await bob.locator('.search-panel input').fill('fully p2p')
   await bob.locator('.search-hit', { hasText: 'Alice' }).first().waitFor({ timeout: 5000 })
   await bob.locator('.search-panel input').fill('from:bob works')
@@ -849,66 +863,73 @@ try {
   await alice.waitForTimeout(500)
   if (await audioOver(1500) <= 0) throw new Error('audio did not come back after unmuting')
 
-  step('screen share at 1080p60' + (process.env.CODEC ? ' with ' + process.env.CODEC : ''))
-  if (process.env.CODEC) {
-    await alice.evaluate(async (codec) => { window.__od.model.settings = await window.od.setSettings({ screen: { codec } }) }, process.env.CODEC)
-  }
-  await alice.locator('.call-controls button[title="Share your screen"]').click()
-  await alice.locator('.source').first().waitFor({ timeout: 15000 })
-  await alice.locator('.modal select').first().selectOption('1080p60')
-  await shot(alice, '07-screen-picker')
-  await alice.getByRole('button', { name: 'Go live' }).click()
-  await alice.locator('.tile.screen video').waitFor({ timeout: 15000 })
-  await alice.locator('.tile-viewers.none').waitFor({ timeout: 5000 })
-  await bob.locator('.tile.screen .watch-btn').waitFor({ timeout: 20000 })
-  if (await bob.locator('.tile.screen video').count()) throw new Error('stream started before bob chose to watch')
-  await bob.waitForFunction(() => window.__od.voice.sharing.size === 1, null, { timeout: 5000 }) // and played the "went live" sound
-  const sentBefore = await alice.evaluate(() => [...window.__od.voice.calls.values()][0]?.sendingScreen)
-  if (sentBefore) throw new Error('alice sends her screen to someone who is not watching')
-  await shot(bob, '29-watch-card')
-  await bob.locator('.tile.screen .watch-btn').click()
-  await bob.locator('.tile.screen video').waitFor({ timeout: 20000 })
-  await alice.locator('.tile-viewers', { hasText: 'Bob' }).waitFor({ timeout: 10000 })
-  await alice.locator('.vp-note.watchers', { hasText: 'Bob' }).waitFor({ timeout: 5000 })
-  await bob.waitForFunction(() => /\d+×\d+ · \d+ fps/.test(document.querySelector('.tile.screen .tile-stats')?.textContent || ''), null, { timeout: 30000 })
-  for (let i = 0; i < 5; i++) {
-    await new Promise(r => setTimeout(r, 2500))
-    console.log(`   t+${(i + 1) * 2.5}s  alice: ${(await alice.locator('.tile.screen .tile-stats').textContent()).trim()}  |  bob receives: ${(await bob.locator('.tile.screen .tile-stats').textContent()).trim()}`)
-  }
-  console.log('   encoder:', await alice.evaluate(() => [...window.__od.voice.calls.values()][0]?.stats?.sendScreen?.encoder))
-  console.log('   capture:', JSON.stringify(await alice.evaluate(() => { const s = window.__od.voice.local.screen.getVideoTracks()[0].getSettings(); return { w: s.width, h: s.height, fps: s.frameRate } })))
-  await shot(bob, '04-screenshare')
-  await shot(alice, '05-sharing')
+  // A Mac only lets apps record the screen once it's allowed in System Settings, which a test
+  // runner may not have done
+  const screenAccess = MAC ? await apps[0].evaluate(({ systemPreferences }) => systemPreferences.getMediaAccessStatus('screen')) : 'granted'
+  if (screenAccess !== 'granted') {
+    step('screen share: skipped, this Mac has not allowed screen recording (' + screenAccess + ')')
+  } else {
+    step('screen share at 1080p60' + (process.env.CODEC ? ' with ' + process.env.CODEC : ''))
+    if (process.env.CODEC) {
+      await alice.evaluate(async (codec) => { window.__od.model.settings = await window.od.setSettings({ screen: { codec } }) }, process.env.CODEC)
+    }
+    await alice.locator('.call-controls button[title="Share your screen"]').click()
+    await alice.locator('.source').first().waitFor({ timeout: 15000 })
+    await alice.locator('.modal select').first().selectOption('1080p60')
+    await shot(alice, '07-screen-picker')
+    await alice.getByRole('button', { name: 'Go live' }).click()
+    await alice.locator('.tile.screen video').waitFor({ timeout: 15000 })
+    await alice.locator('.tile-viewers.none').waitFor({ timeout: 5000 })
+    await bob.locator('.tile.screen .watch-btn').waitFor({ timeout: 20000 })
+    if (await bob.locator('.tile.screen video').count()) throw new Error('stream started before bob chose to watch')
+    await bob.waitForFunction(() => window.__od.voice.sharing.size === 1, null, { timeout: 5000 }) // and played the "went live" sound
+    const sentBefore = await alice.evaluate(() => [...window.__od.voice.calls.values()][0]?.sendingScreen)
+    if (sentBefore) throw new Error('alice sends her screen to someone who is not watching')
+    await shot(bob, '29-watch-card')
+    await bob.locator('.tile.screen .watch-btn').click()
+    await bob.locator('.tile.screen video').waitFor({ timeout: 20000 })
+    await alice.locator('.tile-viewers', { hasText: 'Bob' }).waitFor({ timeout: 10000 })
+    await alice.locator('.vp-note.watchers', { hasText: 'Bob' }).waitFor({ timeout: 5000 })
+    await bob.waitForFunction(() => /\d+×\d+ · \d+ fps/.test(document.querySelector('.tile.screen .tile-stats')?.textContent || ''), null, { timeout: 30000 })
+    for (let i = 0; i < 5; i++) {
+      await new Promise(r => setTimeout(r, 2500))
+      console.log(`   t+${(i + 1) * 2.5}s  alice: ${(await alice.locator('.tile.screen .tile-stats').textContent()).trim()}  |  bob receives: ${(await bob.locator('.tile.screen .tile-stats').textContent()).trim()}`)
+    }
+    console.log('   encoder:', await alice.evaluate(() => [...window.__od.voice.calls.values()][0]?.stats?.sendScreen?.encoder))
+    console.log('   capture:', JSON.stringify(await alice.evaluate(() => { const s = window.__od.voice.local.screen.getVideoTracks()[0].getSettings(); return { w: s.width, h: s.height, fps: s.frameRate } })))
+    await shot(bob, '04-screenshare')
+    await shot(alice, '05-sharing')
 
-  step('zoom into the screen share')
-  const zbox = await bob.locator('.tile.screen .zoom-wrap').first().boundingBox()
-  await bob.mouse.move(zbox.x + zbox.width * 0.7, zbox.y + zbox.height * 0.3)
-  await bob.mouse.wheel(0, -500)
-  await bob.waitForFunction(() => parseInt(document.querySelector('.zoom-pct')?.textContent) > 150, null, { timeout: 5000 })
-  await bob.mouse.down()
-  await bob.mouse.move(zbox.x + zbox.width * 0.5, zbox.y + zbox.height * 0.5, { steps: 5 })
-  await bob.mouse.up()
-  console.log('   zoom:', (await bob.locator('.zoom-pct').textContent()).trim(), await bob.locator('.zoom-inner').evaluate(el => el.style.transform))
-  await shot(bob, '17-zoomed')
-  await bob.locator('.zoom-pct').click()
+    step('zoom into the screen share')
+    const zbox = await bob.locator('.tile.screen .zoom-wrap').first().boundingBox()
+    await bob.mouse.move(zbox.x + zbox.width * 0.7, zbox.y + zbox.height * 0.3)
+    await bob.mouse.wheel(0, -500)
+    await bob.waitForFunction(() => parseInt(document.querySelector('.zoom-pct')?.textContent) > 150, null, { timeout: 5000 })
+    await bob.mouse.down()
+    await bob.mouse.move(zbox.x + zbox.width * 0.5, zbox.y + zbox.height * 0.5, { steps: 5 })
+    await bob.mouse.up()
+    console.log('   zoom:', (await bob.locator('.zoom-pct').textContent()).trim(), await bob.locator('.zoom-inner').evaluate(el => el.style.transform))
+    await shot(bob, '17-zoomed')
+    await bob.locator('.zoom-pct').click()
 
-  step('stop watching, then watch again')
-  await bob.locator('.tile.screen').hover()
-  await bob.locator('.tile.screen .stop-watch').click()
-  await bob.locator('.tile.screen .watch-btn').waitFor({ timeout: 5000 })
-  await alice.locator('.tile-viewers.none').waitFor({ timeout: 10000 })
-  await alice.waitForFunction(() => ![...window.__od.voice.calls.values()][0]?.sendingScreen, null, { timeout: 10000 })
-  console.log('   alice stopped sending video once bob stopped watching')
-  // watch again by clicking Alice's name in the voice channel
-  await bob.locator('.voice-user', { hasText: 'Alice' }).click()
-  await bob.locator('.tile.screen video').waitFor({ timeout: 20000 })
-  await alice.locator('.tile-viewers', { hasText: 'Bob' }).waitFor({ timeout: 10000 })
-  if (await bob.locator('.tile.screen .stream-mute').count()) {
+    step('stop watching, then watch again')
     await bob.locator('.tile.screen').hover()
-    await bob.locator('.tile.screen .stream-mute').click()
-    await bob.locator('.tile.screen .stream-mute.off').waitFor({ timeout: 3000 })
-    console.log('   stream sound muted')
-  } else console.log('   (this capture has no sound, so there is no stream mute button)')
+    await bob.locator('.tile.screen .stop-watch').click()
+    await bob.locator('.tile.screen .watch-btn').waitFor({ timeout: 5000 })
+    await alice.locator('.tile-viewers.none').waitFor({ timeout: 10000 })
+    await alice.waitForFunction(() => ![...window.__od.voice.calls.values()][0]?.sendingScreen, null, { timeout: 10000 })
+    console.log('   alice stopped sending video once bob stopped watching')
+    // watch again by clicking Alice's name in the voice channel
+    await bob.locator('.voice-user', { hasText: 'Alice' }).click()
+    await bob.locator('.tile.screen video').waitFor({ timeout: 20000 })
+    await alice.locator('.tile-viewers', { hasText: 'Bob' }).waitFor({ timeout: 10000 })
+    if (await bob.locator('.tile.screen .stream-mute').count()) {
+      await bob.locator('.tile.screen').hover()
+      await bob.locator('.tile.screen .stream-mute').click()
+      await bob.locator('.tile.screen .stream-mute.off').waitFor({ timeout: 3000 })
+      console.log('   stream sound muted')
+    } else console.log('   (this capture has no sound, so there is no stream mute button)')
+  }
 
   step('moderation: mute for everyone, then move')
   await alice.locator('.tile.person', { hasText: 'Bob' }).click({ button: 'right' })

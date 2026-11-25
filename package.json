@@ -78,13 +78,24 @@
     },
     "mac": {
       "target": [
-        "dmg"
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
       ],
       "category": "public.app-category.social-networking",
+      "identity": "-",
+      "hardenedRuntime": false,
       "extendInfo": {
         "NSMicrophoneUsageDescription": "OpenDiscord needs the microphone for voice chat.",
         "NSCameraUsageDescription": "OpenDiscord needs the camera for video chat."
       }
+    },
+    "dmg": {
+      "artifactName": "OpenDiscord-${version}-${arch}.${ext}"
     },
     "linux": {
       "target": [

@@ -25,6 +25,7 @@ import { Logo } from './lib/logo.js'
 import { setIconStyle } from './lib/icons.js'
 import { DockLayout } from './views/dock.js'
 import { DocsView, FocusEditor } from './views/focus.js'
+import { setMac, mod } from './lib/keys.js'
 
 // ---------------------------------------------------------------- shell
 
@@ -313,6 +314,7 @@ async function boot () {
   model.settings = init.settings
   applyTheme(model.settings)
   model.platform = init.platform
+  setMac(init.platform === 'darwin')
   model.profile = init.profile
   model.version = init.version
   model.compat = init.compat || []
@@ -412,9 +414,9 @@ async function boot () {
     if (action === 'toggle-deafen') voice.toggleDeafen()
   })
   window.addEventListener('keydown', (e) => {
-    if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === 'm') { e.preventDefault(); voice.toggleMute() }
-    if (e.ctrlKey && e.key === ',') { e.preventDefault(); model.openModal('settings') }
-    if (e.ctrlKey && !e.shiftKey && e.key.toLowerCase() === 'f' && model.me?.name && !model.ui.modal) { e.preventDefault(); model.openSearch(model.ui.search?.q || '') }
+    if (mod(e) && e.shiftKey && e.key.toLowerCase() === 'm') { e.preventDefault(); voice.toggleMute() }
+    if (mod(e) && e.key === ',') { e.preventDefault(); model.openModal('settings') }
+    if (mod(e) && !e.shiftKey && e.key.toLowerCase() === 'f' && model.me?.name && !model.ui.modal) { e.preventDefault(); model.openSearch(model.ui.search?.q || '') }
   })
   window.addEventListener('beforeunload', () => voice.leave(true))
   window.__od = { model, voice } // handy for poking around in DevTools (Ctrl+Shift+I)

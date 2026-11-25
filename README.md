@@ -53,9 +53,21 @@ codec**, so you can see what you're getting.
 *More info → Run anyway*. If Windows Firewall asks, allow access on **private networks**.
 (There's also a portable `.exe`. It can't update itself, so its first update installs the app.)
 
-**Mac/Linux:** install [Node.js 20+](https://nodejs.org), then from this folder:
-`npm install` and `npm start`. (Mac `.dmg`/Linux AppImage builds have to be made on those systems:
-`npm run dist:mac` / `npm run dist:linux`.)
+**Mac:** download the `.dmg` for your Mac from the newest [release](../../releases):
+`OpenDiscord-<version>-arm64.dmg` for Apple silicon (M1 or newer; Apple menu → *About This Mac*
+says "Chip: Apple M…"), `OpenDiscord-<version>-x64.dmg` for an Intel Mac. Open it and drag
+OpenDiscord into *Applications*. The app isn't registered with Apple (that costs $99 a year), so
+the first time you open it macOS says it can't check it for malware: click *Done*, open
+**System Settings → Privacy & Security**, scroll down and click **Open Anyway**. macOS then asks
+for the microphone the first time you join a call. To share your screen, allow OpenDiscord under
+*Privacy & Security → Screen & System Audio Recording* and reopen the app (the screen picker has
+a button that takes you there).
+On a Mac the app can't replace itself, so it **tells you about updates** instead: click
+**Download update** in the title bar, open the downloaded file and drag OpenDiscord into
+Applications again (*Replace*). Your groups and messages stay. Shortcuts use ⌘ instead of Ctrl.
+
+**Linux:** install [Node.js 20+](https://nodejs.org), then from this folder:
+`npm install` and `npm start`, or build an AppImage there with `npm run dist:linux`.
 
 Then:
 1. Pick a display name. You can add a profile picture in Settings → My profile.
@@ -352,13 +364,16 @@ Without relays, a direct connection needs at least one of you to be on a "hole-p
 and every 3 hours after that. It downloads new versions in the background and verifies their
 SHA-512 hash. A green **Restart to update** button then appears in the title bar. If you
 ignore it, the update installs the next time you quit the app. Settings → Updates shows the
-version, lets you check by hand, and turns automatic checks off.
+version, lets you check by hand, and turns automatic checks off. On a Mac the button says
+**Download update** and opens the new `.dmg` for your Mac (only apps signed with a paid Apple
+Developer ID can replace themselves there).
 
 **For whoever maintains the repo:** releasing is automatic.
 [`.github/workflows/release.yml`](.github/workflows/release.yml) runs on every push to `main`. It
-runs the tests, builds the installer and portable exe, runs the two-app end-to-end test against
-that build, and only then publishes a GitHub release `vX.Y.Z` (screenshots of a failed run are
-kept as a workflow artifact).
+runs the tests and builds the Windows installer and portable exe on Windows and the two Mac disk
+images (Apple silicon and Intel) on a Mac, runs the two-app end-to-end test against the Windows
+build and the Apple silicon build, and only when all of that passes publishes one GitHub release
+`vX.Y.Z` with all of them (screenshots of a failed run are kept as a workflow artifact).
 - **Version numbers:** `major.minor` comes from `package.json` and the patch number counts up
   by itself (0.2.0, 0.2.1, 0.2.2, …). For a bigger release, set `package.json` to e.g. `0.3.0`.
 - **Skipping a release:** start the commit's first line with `[skip release]` to push without
@@ -383,6 +398,7 @@ npm run dev:bob
 npm test                  # headless tests: sync, gossip, auth, forged messages, files, kick, friends, one-time links, stubs, backups, versions, chess, poker, polls, search, Claude's privacy
 npm run test:e2e          # drives two real app instances through every feature (chat, threads, planner, chess, poker, polls, search, @claude against a local stand-in, calls, soundboard, backup and restore…)
 npm run dist              # Windows installer + portable .exe into dist/
+npm run dist:mac          # on a Mac: the two .dmg files (Apple silicon, Intel) into dist/
 npm run test:update       # after dist: update flow against a local feed (never installs anything)
 ```
 

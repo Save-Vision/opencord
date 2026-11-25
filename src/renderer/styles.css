@@ -1458,3 +1458,8 @@ html[data-theme=minimal] .ft-sep { background: var(--bg-4); }
 
 /* ---- chess against the computer (lib/chessbot.js) ---- */
 .bot-avatar { flex: none; border-radius: 50%; display: grid; place-items: center; background: linear-gradient(135deg, var(--accent), var(--bg-3)); color: var(--accent-ink, #fff); }
+
+/* ---- macOS: screen recording permission in the screen picker ---- */
+.mac-permission { display: flex; align-items: center; gap: 12px; padding: 10px 12px; margin-bottom: 12px; border-radius: 10px; background: var(--accent-soft); border: 1px solid var(--accent); color: var(--text-1); }
+.mac-permission > div { flex: 1; display: flex; flex-direction: column; gap: 2px; }
+.mac-permission small { color: var(--text-2); line-height: 1.35; }

@@ -10,12 +10,26 @@ export function initUpdates () {
     const was = model.update?.status
     model.update = s
     if (s.status === 'ready' && was !== 'ready') model.toast(`OpenDiscord ${s.version} is ready. Restart when it suits you.`)
+    if (s.status === 'available' && was !== 'available') model.toast(`OpenDiscord ${s.version} is out. Download it with the button at the top.`)
     model.emit()
+  })
+}
+
+// On a Mac: download the new version's disk image, then drag it into Applications
+export function downloadUpdate () {
+  const u = model.update
+  if (u?.status !== 'available') return
+  model.openModal('confirm', {
+    title: `Download OpenDiscord ${u.version}?`,
+    body: 'Your browser downloads it. Open the downloaded file, drag OpenDiscord into Applications and choose Replace, then open it again. Your groups and messages stay where they are.',
+    confirm: 'Download',
+    onConfirm: () => act(() => api.installUpdate(), 'Could not open the download')
   })
 }
 
 export function restartForUpdate () {
   const u = model.update
+  if (u?.status === 'available') return downloadUpdate()
   if (u?.status !== 'ready') return
   const parts = [`Version ${u.version} has been downloaded and verified. Restarting takes a few seconds`]
   parts[0] += voice.active ? ' and will drop you from the call.' : '.'
@@ -30,10 +44,10 @@ export function restartForUpdate () {
 
 export function UpdatePill () {
   const u = model.update
-  if (u?.status !== 'ready') return null
+  if (u?.status !== 'ready' && u?.status !== 'available') return null
   return html`
     <button class="update-pill" title=${`Install OpenDiscord ${u.version}`} onClick=${restartForUpdate}>
-      <${Icon} name="download" size=${13} /> Restart to update
+      <${Icon} name="download" size=${13} /> ${u.status === 'available' ? 'Download update' : 'Restart to update'}
     </button>`
 }
 
@@ -45,6 +59,7 @@ export function updateStatusText (u) {
     case 'latest': return 'You have the latest version.'
     case 'downloading': return `Downloading ${u.version}… ${u.percent || 0}%`
     case 'ready': return `Version ${u.version} is ready to install.`
+    case 'available': return `Version ${u.version} is out. Download it and drag it into Applications.`
     case 'installing': return 'Installing…'
     case 'error': return `Couldn't check for updates: ${u.error}`
     default: return 'Not checked yet.'

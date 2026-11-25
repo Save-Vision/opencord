@@ -527,6 +527,9 @@ function ScreenPickerModal () {
   const [hint, setHint] = useState(s.contentHint)
   const [audio, setAudio] = useState(!!s.audio)
   const [busy, setBusy] = useState(false)
+  // macOS asks once for "Screen Recording"; until it's allowed, only the wallpaper shows
+  const [access, setAccess] = useState('granted')
+  useEffect(() => { api.screenAccess().then(setAccess).catch(() => {}) }, [])
 
   useEffect(() => {
     let alive = true
@@ -562,6 +565,12 @@ function ScreenPickerModal () {
         <button class=${tab === 'window' ? 'active' : ''} onClick=${() => setTab('window')}>Application windows</button>
       </div>
       <div class="modal-body">
+        ${access !== 'granted' && html`
+          <div class="mac-permission">
+            <${Icon} name="monitor" size=${20} />
+            <div><b>Allow screen recording</b><small>macOS asks once. In System Settings → Privacy & Security → Screen & System Audio Recording, turn on OpenDiscord, then quit OpenDiscord (⌘Q) and open it again.</small></div>
+            <button class="btn sm" onClick=${() => api.openScreenPrivacy()}>Open System Settings</button>
+          </div>`}
         <div class="source-grid">
           ${!sources && html`<p class="muted">Loading…</p>`}
           ${sources && !list.length && html`<p class="muted">Nothing to share here.</p>`}
@@ -1021,12 +1030,14 @@ function UpdateSettings () {
     </div>
     ${u?.status === 'downloading' && html`<div class="progress update-progress"><i style=${{ width: (u.percent || 0) + '%' }} /></div>`}
     <div class="row">
-      ${u?.status === 'ready'
-        ? html`<button class="btn primary" onClick=${restartForUpdate}>Restart to update</button>`
+      ${u?.status === 'ready' || u?.status === 'available'
+        ? html`<button class="btn primary" onClick=${restartForUpdate}>${u.status === 'available' ? 'Download ' + u.version : 'Restart to update'}</button>`
         : html`<button class="btn" disabled=${!u?.supported || busy} onClick=${check}>${busy ? 'Checking…' : 'Check for updates'}</button>`}
       ${u?.releasesUrl && html`<button class="btn" onClick=${() => api.openExternal(u.releasesUrl)}>What's new</button>`}
     </div>
-    <${Toggle} label="Install updates automatically" hint="Checks GitHub every few hours, downloads new versions in the background and installs them the next time you restart" checked=${model.settings.autoUpdate !== false} onChange=${(v) => saveSettings({ autoUpdate: v })} />
+    ${u?.manual
+      ? html`<${Toggle} label="Check for updates automatically" hint="Checks GitHub every few hours and tells you when there's a new version. On a Mac you download it yourself and drag it into Applications" checked=${model.settings.autoUpdate !== false} onChange=${(v) => saveSettings({ autoUpdate: v })} />`
+      : html`<${Toggle} label="Install updates automatically" hint="Checks GitHub every few hours, downloads new versions in the background and installs them the next time you restart" checked=${model.settings.autoUpdate !== false} onChange=${(v) => saveSettings({ autoUpdate: v })} />`}
     <p class="hint">Updates are the releases published from the project's GitHub repository. Each download is checked against its published SHA-512 hash before it's installed. Checking for updates is the only time the app talks to a server other than the P2P network and STUN. Turn it off to avoid that; you can still check by hand.</p>
     ${u?.portable && html`<p class="hint">You're running the portable .exe. The first update installs OpenDiscord on this PC (per user, no admin needed). After that, start it from the Start menu or desktop. Your groups and messages carry over.</p>`}`
 }

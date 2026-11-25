@@ -1,7 +1,7 @@
 'use strict'
 const {
   app, BrowserWindow, ipcMain, protocol, session, desktopCapturer, shell, dialog,
-  Tray, Menu, nativeImage, clipboard, globalShortcut, safeStorage, powerMonitor, nativeTheme
+  Tray, Menu, nativeImage, clipboard, globalShortcut, safeStorage, powerMonitor, nativeTheme, systemPreferences
 } = require('electron')
 const path = require('path')
 const { attachContextMenu } = require('./contextmenu')
@@ -138,7 +138,7 @@ function openStore (dir) {
 }
 
 async function boot () {
-  app.setAppUserModelId('app.opendiscord' + (profile ? '.' + profile : ''))
+  if (process.platform === 'win32') app.setAppUserModelId('app.opendiscord' + (profile ? '.' + profile : ''))
   store = openStore(await openDataDir())
   claude = new Claude({ dir: store.dir, safeStorage, store })
   net = new Network(store, {
@@ -649,6 +649,11 @@ function registerIpc () {
         thumb: s.thumbnail.isEmpty() ? null : s.thumbnail.toDataURL(),
         icon: s.appIcon && !s.appIcon.isEmpty() ? s.appIcon.toDataURL() : null
       }))
+  })
+  // macOS: "Screen Recording" permission ('granted', 'denied', 'not-determined', …)
+  handle('screen:access', () => process.platform === 'darwin' ? systemPreferences.getMediaAccessStatus('screen') : 'granted')
+  handle('screen:privacy', () => {
+    if (process.platform === 'darwin') shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture')
   })
   handle('screen:select', (id, audio) => {
     pendingScreen = { id: String(id), audio: !!audio }

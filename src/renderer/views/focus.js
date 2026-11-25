@@ -18,6 +18,10 @@ import { Icon } from '../lib/icons.js'
 import { Avatar } from './chat.js'
 import { renderMarkdownDoc } from '../lib/markdown.js'
 import { TOOLS, toolForKey, splitBlocks, blockAt, diffSpan, continueList, toggleTask } from '../lib/mdedit.js'
+import { mod, isMac, keyLabel } from '../lib/keys.js'
+
+// A formatting button's shortcut as shown on this computer (none for headings on a Mac)
+const toolKeys = (t) => t.keys && !(isMac() && t.id === 'heading') ? keyLabel(t.keys) : null
 
 const FLUSH_IDLE = 350 // ms without typing before the edit is sent
 const FLUSH_MAX = 1200 // ...but never later than this after the first unsent key
@@ -156,7 +160,7 @@ function Guide ({ onUse, onClose }) {
       <p>Just type. To format, select some words and press a button on the left. Or type the signs yourself: they turn into formatting in the live view.</p>
       ${examples.map(t => html`
         <div key=${t.id} class="fg-item">
-          <div class="fg-head"><${Icon} name=${t.icon} size=${15} /><b>${t.label}</b>${t.keys && html`<kbd>${t.keys}</kbd>`}</div>
+          <div class="fg-head"><${Icon} name=${t.icon} size=${15} /><b>${t.label}</b>${toolKeys(t) && html`<kbd>${toolKeys(t)}</kbd>`}</div>
           <small>${t.hint}</small>
           <div class="fg-example">
             <pre class="fg-src">${t.md}</pre>
@@ -311,7 +315,7 @@ export function FocusEditor ({ g, doc }) {
   useEffect(() => {
     const key = (e) => {
       if (e.key === 'Escape' && !model.ui.modal) { e.preventDefault(); leave() }
-      if (e.ctrlKey && !e.shiftKey && e.key.toLowerCase() === 'e') { e.preventDefault(); pick(view === 'write' ? 'live' : view === 'live' ? 'preview' : 'write') }
+      if (mod(e) && !e.shiftKey && e.key.toLowerCase() === 'e') { e.preventDefault(); pick(view === 'write' ? 'live' : view === 'live' ? 'preview' : 'write') }
     }
     window.addEventListener('keydown', key)
     return () => window.removeEventListener('keydown', key)
@@ -332,12 +336,12 @@ export function FocusEditor ({ g, doc }) {
   const onKeyDown = (e) => {
     const id = toolForKey(e)
     if (id) { e.preventDefault(); apply(TOOLS.find(t => t.id === id)); return }
-    if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.altKey && !composing.current) {
+    if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey && !composing.current) {
       const el = e.currentTarget
       const res = continueList({ text: el.value, start: el.selectionStart, end: el.selectionEnd })
       if (res) { e.preventDefault(); applyResult(res); return }
     }
-    if (!e.ctrlKey && !e.altKey && e.key.length === 1) setCalm(true)
+    if (!e.ctrlKey && !e.metaKey && !e.altKey && e.key.length === 1) setCalm(true)
   }
 
   const here = model.docPresence(g.id, doc.id)
@@ -353,7 +357,7 @@ export function FocusEditor ({ g, doc }) {
         <div class="focus-people" title=${here.length ? here.map(p => model.memberName(g, p.key) + (p.line ? ' · line ' + p.line : '')).join('\n') : 'Only you are here'}>
           ${here.slice(0, 5).map(p => html`<${Avatar} key=${p.key} name=${model.memberName(g, p.key)} color=${model.memberColor(g, p.key)} src=${model.memberAvatar(g, p.key)} size=${26} speaking=${p.typing} />`)}
         </div>
-        <div class="seg focus-views" title="Ctrl+E switches">
+        <div class="seg focus-views" title=${keyLabel('Ctrl+E') + ' switches'}>
           ${VIEWS.map(([v, l]) => html`<button key=${v} class=${view === v ? 'active' : ''} onClick=${() => pick(v)}>${l}</button>`)}
         </div>
         <button class="icon-btn" title="Save as .md file" onClick=${exportMd}><${Icon} name="download" size=${18} /></button>
@@ -362,7 +366,7 @@ export function FocusEditor ({ g, doc }) {
         <nav class="focus-tools" aria-label="Formatting">
           ${TOOLS.map((t, i) => t.sep
             ? html`<i key=${'s' + i} class="ft-sep" />`
-            : html`<button key=${t.id} class="ft-btn" data-tool=${t.id} aria-label=${t.label} title=${`${t.label}${t.keys ? ' (' + t.keys + ')' : ''}\n${t.hint}`}
+            : html`<button key=${t.id} class="ft-btn" data-tool=${t.id} aria-label=${t.label} title=${`${t.label}${toolKeys(t) ? ' (' + toolKeys(t) + ')' : ''}\n${t.hint}`}
                 onMouseDown=${(e) => e.preventDefault()} onClick=${() => apply(t)}><${Icon} name=${t.icon} size=${18} /></button>`)}
           <span class="spacer" />
           <button class="ft-btn ${guide ? 'on' : ''}" aria-label="Formatting guide" title="How formatting works" onClick=${() => guide ? closeGuide() : setGuide(true)}><${Icon} name="help" size=${18} /></button>

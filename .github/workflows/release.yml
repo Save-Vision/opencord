@@ -1,10 +1,11 @@
 name: Release
 
-# Every push to main tests and builds the Windows app and publishes it as a GitHub release.
-# Nothing is released unless the unit tests and the two-app end-to-end test (run against the
-# built app itself) pass.
-# Installed copies of OpenDiscord find it within a few hours (or via Settings → Updates)
-# and update themselves.
+# Every push to main tests and builds the Windows and Mac apps and publishes them as one GitHub
+# release. Nothing is released unless the unit tests and the two-app end-to-end test (run
+# against each built app itself, on Windows and on a Mac) pass.
+# Installed Windows copies of OpenDiscord find it within a few hours (or via Settings → Updates)
+# and update themselves. Mac copies say there's a new version and download it for you (an app
+# can only replace itself on a Mac when it's signed with a paid Apple Developer ID).
 #
 # Versions are automatic: major.minor come from package.json, the patch number counts up
 # (see scripts/next-version.js). Start a commit's first line with [skip release] to push without
@@ -31,24 +32,33 @@ concurrency:
   group: release
   cancel-in-progress: false
 
+env:
+  RELEASES_REPO: ${{ vars.RELEASES_REPO || github.repository }}
+  GH_TOKEN: ${{ secrets.RELEASES_TOKEN || github.token }}
+
 jobs:
   gate:
     runs-on: ubuntu-latest
     outputs:
       release: ${{ steps.check.outputs.release }}
+      version: ${{ steps.version.outputs.version }}
     steps:
       - id: check
         run: |
           subject=$(jq -r '(.head_commit.message // "") | split("\n")[0]' "$GITHUB_EVENT_PATH")
           if [[ "$subject" == *"[skip release]"* ]]; then echo "release=false"; else echo "release=true"; fi >> "$GITHUB_OUTPUT"
 
-  release:
+      - uses: actions/checkout@v4
+
+      # One version for both builds
+      - name: Pick version
+        id: version
+        run: echo "version=$(node scripts/next-version.js "$RELEASES_REPO")" >> "$GITHUB_OUTPUT"
+
+  windows:
     needs: gate
     if: needs.gate.outputs.release == 'true'
     runs-on: windows-latest
-    env:
-      RELEASES_REPO: ${{ vars.RELEASES_REPO || github.repository }}
-      GH_TOKEN: ${{ secrets.RELEASES_TOKEN || github.token }}
     defaults:
       run:
         shell: bash
@@ -65,13 +75,9 @@ jobs:
       - name: Test
         run: npm test
 
-      - name: Pick version
-        id: version
-        run: echo "version=$(node scripts/next-version.js "$RELEASES_REPO")" >> "$GITHUB_OUTPUT"
-
       - name: Build installer and portable exe
         env:
-          VERSION: ${{ steps.version.outputs.version }}
+          VERSION: ${{ needs.gate.outputs.version }}
         run: |
           npx electron-builder --win --publish never \
             -c.extraMetadata.version="$VERSION" \
@@ -89,20 +95,100 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: e2e-screenshots
+          name: e2e-screenshots-windows
           path: test/screenshots/
           retention-days: 14
 
-      - name: Publish release
-        if: github.ref == 'refs/heads/main'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build-windows
+          retention-days: 3
+          path: |
+            dist/OpenDiscord-Setup-${{ needs.gate.outputs.version }}.exe
+            dist/OpenDiscord-Setup-${{ needs.gate.outputs.version }}.exe.blockmap
+            dist/OpenDiscord-${{ needs.gate.outputs.version }}-portable.exe
+            dist/latest.yml
+
+  mac:
+    needs: gate
+    if: needs.gate.outputs.release == 'true'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Test
+        run: npm test
+
+      # A disk image each for Apple silicon (arm64) and Intel (x64). Ad-hoc signed (package.json
+      # → build.mac.identity "-"), so macOS asks once before the first start.
+      - name: Build disk images
         env:
-          VERSION: ${{ steps.version.outputs.version }}
+          VERSION: ${{ needs.gate.outputs.version }}
         run: |
+          npx electron-builder --mac --publish never \
+            -c.extraMetadata.version="$VERSION" \
+            -c.publish.owner="${RELEASES_REPO%%/*}" \
+            -c.publish.repo="${RELEASES_REPO##*/}"
+
+      # The same end-to-end test, on the Apple silicon build. Screen sharing is skipped when the
+      # runner hasn't allowed screen recording (the test says so).
+      - name: End-to-end test (the built app)
+        env:
+          OD_EXE: dist/mac-arm64/OpenDiscord.app/Contents/MacOS/OpenDiscord
+        run: npm run test:e2e || (echo "Retrying once…" && npm run test:e2e)
+
+      - name: Keep screenshots of a failed run
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-screenshots-mac
+          path: test/screenshots/
+          retention-days: 14
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build-mac
+          retention-days: 3
+          path: |
+            dist/OpenDiscord-${{ needs.gate.outputs.version }}-arm64.dmg
+            dist/OpenDiscord-${{ needs.gate.outputs.version }}-x64.dmg
+            dist/latest-mac.yml
+
+  publish:
+    needs: [gate, windows, mac]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: build-*
+          path: dist
+          merge-multiple: true
+
+      - name: Publish release
+        env:
+          VERSION: ${{ needs.gate.outputs.version }}
+        run: |
+          ls -l dist
           {
             echo "## What's changed"
             jq -r 'if ((.commits // []) | length) > 0 then .commits[] | "- " + (.message | split("\n")[0]) else "- Manual build" end' "$GITHUB_EVENT_PATH"
             echo
-            echo "**Already using OpenDiscord?** It updates itself. **New?** Download \`OpenDiscord-Setup-$VERSION.exe\`."
+            echo "**Already using OpenDiscord?** On Windows it updates itself; on a Mac it shows a *Download update* button."
+            echo
+            echo "**New?**"
+            echo "- Windows: \`OpenDiscord-Setup-$VERSION.exe\`"
+            echo "- Mac with Apple silicon (M1 or newer): \`OpenDiscord-$VERSION-arm64.dmg\`"
+            echo "- Mac with an Intel chip: \`OpenDiscord-$VERSION-x64.dmg\`"
+            echo
+            echo "On a Mac, drag OpenDiscord into Applications. The first time you open it, macOS says it can't check it for malware (the app isn't registered with Apple): click *Done*, then open System Settings → Privacy & Security, scroll down and click *Open Anyway*."
           } > notes.md
           target=()
           if [ "$RELEASES_REPO" = "$GITHUB_REPOSITORY" ]; then target=(--target "$GITHUB_SHA"); fi
@@ -111,5 +197,8 @@ jobs:
             "dist/OpenDiscord-Setup-$VERSION.exe.blockmap" \
             "dist/OpenDiscord-$VERSION-portable.exe" \
             dist/latest.yml \
+            "dist/OpenDiscord-$VERSION-arm64.dmg" \
+            "dist/OpenDiscord-$VERSION-x64.dmg" \
+            dist/latest-mac.yml \
             --repo "$RELEASES_REPO" "${target[@]}" \
             --title "OpenDiscord $VERSION" --notes-file notes.md

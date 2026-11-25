@@ -72,6 +72,8 @@ contextBridge.exposeInMainWorld('od', {
 
   screenSources: () => invoke('screen:sources'),
   selectScreen: (id, audio) => invoke('screen:select', id, audio),
+  screenAccess: () => invoke('screen:access'),
+  openScreenPrivacy: () => invoke('screen:privacy'),
 
   netStatus: () => invoke('net:status'),
   netRetry: () => invoke('net:retry'),

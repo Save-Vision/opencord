@@ -13,6 +13,7 @@ import { GameCard } from './games.js'
 import { PollCard } from './polls.js'
 import { openMemberMenu } from './members.js'
 import { OutdatedBanner } from './compat.js'
+import { keyLabel } from '../lib/keys.js'
 
 const drafts = new Map()
 const PAGE = 150
@@ -167,7 +168,7 @@ export function ChatView ({ g, ch }) {
           : !g.kickedMe && model.appOn(g, 'games') && html`<button class="icon-btn" title="Play a game in this channel" onClick=${() => model.openModal('newGame', { gid: g.id, ch: ch.id })}><${Icon} name="chess" /></button>`}
         ${!g.kickedMe && !g.restoring && html`<button class="icon-btn" title="Create a poll" onClick=${() => model.openModal('poll', { gid: g.id, ch: ch.id })}><${Icon} name="poll" /></button>`}
         <${PinsButton} g=${g} ch=${ch} />
-        <button class="icon-btn ${model.ui.search?.gid === g.id ? 'on' : ''}" title="Search (Ctrl+F)" onClick=${() => model.openSearch('')}><${Icon} name="search" /></button>
+        <button class="icon-btn ${model.ui.search?.gid === g.id ? 'on' : ''}" title=${'Search (' + keyLabel('Ctrl+F') + ')'} onClick=${() => model.openSearch('')}><${Icon} name="search" /></button>
         ${!dm && model.canInvite(g) && html`<button class="icon-btn" title="Invite friends" onClick=${() => model.openModal('invite', { gid: g.id })}><${Icon} name="userPlus" /></button>`}
       </header>
       ${g.kickedMe && html`

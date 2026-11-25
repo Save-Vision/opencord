@@ -6,6 +6,8 @@
 
 // ---------------------------------------------------------------- inline: **bold**, *italic*…
 
+import { mod, isMac } from './keys.js'
+
 export function wrap ({ text, start, end }, before, after = before, placeholder = 'text') {
   const sel = text.slice(start, end)
   // already wrapped around the selection: unwrap
@@ -140,11 +142,11 @@ export const TOOLS = [
   { id: 'divider', icon: 'minus', label: 'Divider', hint: 'A line across the page between parts.', md: 'above\n\n---\n\nbelow', run: divider }
 ]
 
-// Ctrl+… shortcuts for the editor
+// Ctrl+… shortcuts for the editor (⌘ on a Mac, where ⌘H hides the app, so no heading key there)
 export function toolForKey (e) {
-  if (!e.ctrlKey || e.altKey) return null
+  if (!mod(e) || e.altKey) return null
   const k = e.key.toLowerCase()
-  if (!e.shiftKey) return { b: 'bold', i: 'italic', k: 'link', h: 'heading' }[k] || null
+  if (!e.shiftKey) return { b: 'bold', i: 'italic', k: 'link', h: isMac() ? null : 'heading' }[k] || null
   // the physical keys, so Ctrl+Shift+8 works on every keyboard layout
   return { Digit8: 'bullet', Digit7: 'number', Digit9: 'task', KeyX: 'strike' }[e.code] || null
 }

@@ -5,10 +5,14 @@
 //
 // Works for the installed (NSIS) build. The portable .exe can't replace itself, so updating
 // from it installs OpenDiscord on this PC. Your data folder is shared, so nothing is lost.
+//
+// On a Mac an app can only replace itself when it's signed with a paid Apple Developer ID, and
+// these builds aren't. So there it only checks: a new version shows a Download button, which
+// opens the .dmg for this Mac (Apple silicon or Intel) in the browser.
 const fs = require('fs')
 const path = require('path')
 const { EventEmitter } = require('events')
-const { app } = require('electron')
+const { app, shell } = require('electron')
 
 const FIRST_CHECK_DELAY = 20 * 1000
 const CHECK_EVERY = 3 * 60 * 60 * 1000
@@ -29,7 +33,8 @@ class Updater extends EventEmitter {
     super()
     this.isEnabled = isEnabled // () => boolean, the "check automatically" setting
     this.portable = !!process.env.PORTABLE_EXECUTABLE_FILE
-    this.state = { supported: false, status: 'idle', current: app.getVersion(), version: null, percent: 0, error: null, checkedAt: null, portable: this.portable, releasesUrl: null }
+    this.manual = process.platform === 'darwin'
+    this.state = { supported: false, status: 'idle', current: app.getVersion(), version: null, percent: 0, error: null, checkedAt: null, portable: this.portable, manual: this.manual, download: null, releasesUrl: null }
     this.timer = null
   }
 
@@ -50,15 +55,18 @@ class Updater extends EventEmitter {
     if (feed?.provider === 'github' && feed.owner && feed.repo) {
       this.state.releasesUrl = `https://github.com/${feed.owner}/${feed.repo}/releases`
     }
-    autoUpdater.autoDownload = true
+    autoUpdater.autoDownload = !this.manual
     // A test feed must never install anything when the test closes the app
-    autoUpdater.autoInstallOnAppQuit = !testFeed
+    autoUpdater.autoInstallOnAppQuit = !testFeed && !this.manual
     autoUpdater.allowDowngrade = false
     autoUpdater.logger = { info () {}, debug () {}, warn: (m) => console.warn('[updater]', m), error: (m) => console.warn('[updater]', m) }
 
     autoUpdater.on('checking-for-update', () => this._set({ status: 'checking', error: null }))
     autoUpdater.on('update-not-available', () => this._set({ status: 'latest', checkedAt: Date.now() }))
-    autoUpdater.on('update-available', (info) => this._set({ status: 'downloading', version: info.version, percent: 0, checkedAt: Date.now() }))
+    autoUpdater.on('update-available', (info) => {
+      if (this.manual) return this._set({ status: 'available', version: info.version, download: this._dmg(info.version), checkedAt: Date.now() })
+      this._set({ status: 'downloading', version: info.version, percent: 0, checkedAt: Date.now() })
+    })
     autoUpdater.on('download-progress', (p) => this._set({ status: 'downloading', percent: Math.round(p.percent || 0) }))
     autoUpdater.on('update-downloaded', (info) => this._set({ status: 'ready', version: info.version, percent: 100 }))
     autoUpdater.on('error', (err) => this._set({ status: 'error', error: friendlyError(err) }))
@@ -75,7 +83,14 @@ class Updater extends EventEmitter {
   }
 
   _auto () {
-    if (this.isEnabled() && this.state.status !== 'ready' && this.state.status !== 'downloading') this.check()
+    if (this.isEnabled() && !['ready', 'downloading', 'available'].includes(this.state.status)) this.check()
+  }
+
+  // The new version's disk image for this Mac, from the release (see release.yml)
+  _dmg (version) {
+    const base = this.state.releasesUrl
+    if (!base) return null
+    return `${base}/download/v${version}/OpenDiscord-${version}-${process.arch === 'arm64' ? 'arm64' : 'x64'}.dmg`
   }
 
   async check () {
@@ -89,6 +104,10 @@ class Updater extends EventEmitter {
   }
 
   install () {
+    if (this.state.status === 'available' && this.state.download) {
+      shell.openExternal(this.state.download)
+      return true
+    }
     if (this.state.status !== 'ready') return false
     this._set({ status: 'installing' })
     // Silent install, then start the new version.

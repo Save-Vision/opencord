@@ -1,4 +1,5 @@
 import { html, useState, useEffect, useRef } from '../vendor/preact-htm.js'
+import { keyLabel } from '../lib/keys.js'
 import { model, voice, act, fmtRate, saveSettings } from '../lib/core.js'
 import { Icon } from '../lib/icons.js'
 import { Avatar } from './chat.js'
@@ -275,10 +276,10 @@ export function MuteIcons ({ g, k, st, size = 14 }) {
 export function CallControls () {
   return html`
     <div class="call-controls">
-      <button class="round ${voice.muted ? 'off' : ''}" title=${(voice.muted ? 'Unmute' : 'Mute') + ' (Ctrl+Shift+F9)'} onClick=${() => voice.toggleMute()}>
+      <button class="round ${voice.muted ? 'off' : ''}" title=${(voice.muted ? 'Unmute' : 'Mute') + ' (' + keyLabel('Ctrl+Shift+F9') + ')'} onClick=${() => voice.toggleMute()}>
         <${Icon} name=${voice.muted ? 'micOff' : 'mic'} size=${22} />
       </button>
-      <button class="round ${voice.deafened ? 'off' : ''}" title=${(voice.deafened ? 'Undeafen' : 'Deafen') + ' (Ctrl+Shift+F10)'} onClick=${() => voice.toggleDeafen()}>
+      <button class="round ${voice.deafened ? 'off' : ''}" title=${(voice.deafened ? 'Undeafen' : 'Deafen') + ' (' + keyLabel('Ctrl+Shift+F10') + ')'} onClick=${() => voice.toggleDeafen()}>
         <${Icon} name=${voice.deafened ? 'headphonesOff' : 'headphones'} size=${22} />
       </button>
       <button class="round ${voice.local.cam ? 'on' : ''}" title=${voice.local.cam ? 'Turn camera off' : 'Turn camera on'} onClick=${() => voice.toggleCamera()}>

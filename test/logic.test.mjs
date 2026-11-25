@@ -903,6 +903,7 @@ test('focus docs: the model keeps documents, names, and who may delete them', ()
 
 // ---- 0.6.3: formatting buttons and the live preview ----
 const md = await import('../src/renderer/lib/mdedit.js')
+const keys = await import('../src/renderer/lib/keys.js')
 // state from 'some [text] here' (the brackets mark the selection)
 const sel = (s) => { const a = s.indexOf('['); const b = s.indexOf(']') - 1; return { text: s.replace('[', '').replace(']', ''), start: a, end: b } }
 const show = (r) => r.text.slice(0, r.start) + '[' + r.text.slice(r.start, r.end) + ']' + r.text.slice(r.end)
@@ -970,6 +971,19 @@ test('formatting: keyboard shortcuts', () => {
   assert.strictEqual(k('X', 'KeyX', { shiftKey: true }), 'strike')
   assert.strictEqual(k('z', 'KeyZ'), null)
   assert.strictEqual(md.toolForKey({ ctrlKey: false, key: 'b', code: 'KeyB' }), null)
+  // on a Mac it's ⌘ (Ctrl+click is a right-click there), and ⌘H stays "hide the app"
+  keys.setMac(true)
+  try {
+    assert.strictEqual(md.toolForKey({ metaKey: true, key: 'b', code: 'KeyB' }), 'bold')
+    assert.strictEqual(md.toolForKey({ ctrlKey: true, key: 'b', code: 'KeyB' }), null)
+    assert.strictEqual(md.toolForKey({ metaKey: true, shiftKey: true, key: '*', code: 'Digit8' }), 'bullet')
+    assert.strictEqual(md.toolForKey({ metaKey: true, key: 'h', code: 'KeyH' }), null)
+    assert.strictEqual(keys.keyLabel('Ctrl+Shift+F9'), '⌘⇧F9')
+  } finally {
+    keys.setMac(false)
+  }
+  assert.strictEqual(md.toolForKey({ ctrlKey: true, key: 'h', code: 'KeyH' }), 'heading')
+  assert.strictEqual(keys.keyLabel('Ctrl+F'), 'Ctrl+F')
   // every button explains itself and shows an example
   for (const t of md.TOOLS.filter(x => !x.sep)) assert.ok(t.label && t.hint && t.md && t.icon && typeof t.run === 'function', t.id)
 })

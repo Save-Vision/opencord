@@ -47,8 +47,8 @@ export function UpdateRequired () {
         ${u?.status === 'downloading' && html`<div class="ur-progress"><span style=${{ width: (u.percent || 0) + '%' }} /></div>`}
         <p class="muted">${updateStatusText(u)}</p>
         <div class="row center">
-          ${u?.status === 'ready'
-            ? html`<button class="btn primary lg" onClick=${() => act(() => api.installUpdate(), 'Update failed')}>Restart and update</button>`
+          ${u?.status === 'ready' || u?.status === 'available'
+            ? html`<button class="btn primary lg" onClick=${() => act(() => api.installUpdate(), 'Update failed')}>${u.status === 'available' ? 'Download ' + u.version : 'Restart and update'}</button>`
             : html`<button class="btn primary lg" disabled=${busy || !u?.supported} onClick=${() => act(() => api.checkForUpdate())}>${busy ? 'Updating…' : 'Try again'}</button>`}
           ${(u?.status === 'error' || !u?.supported) && html`<button class="btn lg" onClick=${() => api.openExternal(RELEASES)}>Download from GitHub</button>`}
         </div>
