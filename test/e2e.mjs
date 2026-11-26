@@ -13,6 +13,9 @@
 // and checkboxes ticked in the preview. Since 0.7: group apps, chess against the computer, more
 // folders, the reaction picker on the last message, watching a stream from the channel list,
 // away in the friend list and hanging up a private call. It also runs on a Mac (⌘ shortcuts).
+// Since 0.8: dropdowns drawn in the theme's colours, starting with the computer (a stand-in: tests
+// never touch the system), the music bot (a music file, then a link through the app's own
+// fetcher, skip, pause) and dragging someone into another voice channel.
 // Screenshots land in test/screenshots/.
 // Run: npm run test:e2e
 import { _electron as electron } from 'playwright-core'
@@ -38,7 +41,29 @@ let failed = false
 // A stand-in for the Anthropic API on this PC, so @claude is tested without a real key or cost
 const TEST_KEY = 'sk-ant-test-' + 'k'.repeat(28)
 const claudeLog = []
+// A 20 s tone as a WAV file: what the music bot plays from a link (stereo, 22.05 kHz)
+function toneWav (seconds = 20, rate = 22050) {
+  const n = seconds * rate
+  const buf = Buffer.alloc(44 + n * 4)
+  buf.write('RIFF', 0); buf.writeUInt32LE(36 + n * 4, 4); buf.write('WAVEfmt ', 8); buf.writeUInt32LE(16, 16); buf.writeUInt16LE(1, 20); buf.writeUInt16LE(2, 22)
+  buf.writeUInt32LE(rate, 24); buf.writeUInt32LE(rate * 4, 28); buf.writeUInt16LE(4, 32); buf.writeUInt16LE(16, 34); buf.write('data', 36); buf.writeUInt32LE(n * 4, 40)
+  for (let i = 0; i < n; i++) {
+    const v = Math.round(Math.sin(i / rate * 2 * Math.PI * 440) * 9000)
+    buf.writeInt16LE(v, 44 + i * 4)
+    buf.writeInt16LE(v, 46 + i * 4)
+  }
+  return buf
+}
+const TONE = toneWav()
 const claudeMock = http.createServer((req, res) => {
+  if (req.method === 'GET' && req.url === '/music/tone.wav') {
+    res.writeHead(200, { 'content-type': 'audio/wav', 'content-length': TONE.length })
+    return res.end(TONE)
+  }
+  if (req.method === 'GET' && req.url === '/blog') {
+    res.writeHead(200, { 'content-type': 'text/html' })
+    return res.end('<html><body>a page</body></html>')
+  }
   let body = ''
   req.on('data', (c) => { body += c })
   req.on('end', async () => {
@@ -302,6 +327,16 @@ try {
   await alice.getByRole('button', { name: 'Updates', exact: true }).click()
   console.log('   updates tab:', (await alice.locator('.update-status').textContent()).trim())
   await alice.getByRole('button', { name: 'Network', exact: true }).click()
+  // start with the computer: in tests the app only remembers it, the system is never touched
+  const startup = alice.locator('.toggle-row', { hasText: /Start OpenDiscord with Windows|Open OpenDiscord when you log in/ })
+  await startup.locator('input').check()
+  await alice.locator('.toggle-row', { hasText: 'Start in the background' }).waitFor({ timeout: 5000 })
+  const auto = await alice.evaluate(() => window.od.autostart())
+  if (!auto.enabled || !auto.hidden) throw new Error('start with the computer did not switch on: ' + JSON.stringify(auto))
+  await startup.locator('input').uncheck()
+  await alice.locator('.toggle-row', { hasText: 'Start in the background' }).waitFor({ state: 'detached', timeout: 5000 })
+  if ((await alice.evaluate(() => window.od.autostart())).enabled) throw new Error('start with the computer did not switch off')
+  console.log('   start with the computer: switched on and off')
   await shot(alice, '06b-network')
   await alice.getByRole('button', { name: 'Storage', exact: true }).click()
   await alice.locator('.settings-body .hint', { hasText: 'used' }).waitFor({ timeout: 10000 })
@@ -309,7 +344,18 @@ try {
   console.log('   messages:', (await alice.locator('.usage-rows > div').first().textContent()).trim())
   await shot(alice, '15-storage')
   await alice.getByRole('button', { name: 'Voice & audio', exact: true }).click()
-  console.log('   noise suppression:', await alice.locator('.settings-body select:has(option[value="ai"])').inputValue())
+  const noise = alice.locator('.settings-body select:has(option[value="ai"])')
+  console.log('   noise suppression:', await noise.inputValue())
+  // dropdowns are drawn by the app in the theme's colours, so their list is part of the page
+  if (await noise.evaluate(el => getComputedStyle(el).appearance) !== 'base-select') throw new Error('the dropdown is still drawn by the system')
+  await noise.click()
+  await alice.locator('.settings-body option[value="standard"]').waitFor({ state: 'visible', timeout: 5000 })
+  await alice.locator('.settings-body option[value="standard"]').hover()
+  await shot(alice, '06c-dropdown')
+  await alice.keyboard.press('Escape')
+  await alice.locator('.settings-body option[value="standard"]').waitFor({ state: 'hidden', timeout: 5000 })
+  // Escape closed only the list, not the settings around it
+  if (!(await alice.locator('.settings-body').isVisible())) throw new Error('Escape on an open dropdown closed the settings')
 
   step('themes: each one changes the whole window and is saved, in light and dark')
   await alice.getByRole('button', { name: 'Appearance', exact: true }).click()
@@ -414,7 +460,7 @@ try {
   await bob.locator('.dropdown').waitFor({ state: 'detached', timeout: 3000 })
   await alice.locator('.add-app-hint').click()
   await alice.locator('.app-row').first().waitFor()
-  for (const name of ['Calendar', 'Tasks', 'Games', 'Focus docs']) {
+  for (const name of ['Calendar', 'Tasks', 'Games', 'Focus docs', 'Music']) {
     await alice.locator('.app-row', { hasText: name }).getByRole('button', { name: 'Add', exact: true }).click()
     await alice.locator('.app-row.added', { hasText: name }).waitFor({ timeout: 5000 })
   }
@@ -843,6 +889,82 @@ try {
   await bob.keyboard.press('Escape')
   await bob.locator('.voice-panel button[title="Soundboard"]').click()
 
+  step('music bot: a music file, then a link, skip and pause; everyone in the call hears it')
+  // what Bob receives on the call's music track (bytes and loudness)
+  const musicIn = (page) => page.evaluate(async () => {
+    let bytes = 0
+    let level = 0
+    for (const c of window.__od.voice.calls.values()) {
+      const mid = c.transceivers[4]?.mid
+      ;(await c.pc.getStats()).forEach(r => { if (r.type === 'inbound-rtp' && r.kind === 'audio' && r.mid === mid) { bytes += r.bytesReceived || 0; level = Math.max(level, r.audioLevel || 0) } })
+    }
+    return { bytes, level }
+  })
+  const queueOf = (page) => page.evaluate(() => {
+    const g = window.__od.model.groupsList().find(x => !x.dm)
+    const q = window.__od.music.queue(g, window.__od.voice.active?.ch)
+    return { now: q.now && { t: q.now.t, by: q.now.by, paused: q.now.paused }, next: q.next.map(e => e.t) }
+  })
+  // alice drops a music file (a 30 s tone) into the queue
+  await alice.evaluate(async () => {
+    const rate = 22050
+    const n = rate * 30
+    const buf = new ArrayBuffer(44 + n * 2)
+    const v = new DataView(buf)
+    const w = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)) }
+    w(0, 'RIFF'); v.setUint32(4, 36 + n * 2, true); w(8, 'WAVEfmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true)
+    v.setUint32(24, rate, true); v.setUint32(28, rate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true); w(36, 'data'); v.setUint32(40, n * 2, true)
+    for (let i = 0; i < n; i++) v.setInt16(44 + i * 2, Math.sin(i / rate * 2 * Math.PI * 330) * 9000, true)
+    await window.__od.music.addFiles([new File([buf], 'Alice_s tune.wav', { type: 'audio/wav' })])
+  })
+  await bob.locator('.voice-user.music-bot', { hasText: 'Alice s tune' }).waitFor({ timeout: 10000 })
+  await bob.locator('.music-tile', { hasText: 'Alice s tune' }).waitFor({ timeout: 10000 })
+  const m0 = await musicIn(bob)
+  await bob.waitForTimeout(1500)
+  const m1 = await musicIn(bob)
+  console.log(`   bob hears alice's song: ${m1.bytes - m0.bytes} bytes in 1.5 s, level ${m1.level.toFixed(2)}`)
+  if (m1.bytes - m0.bytes < 2000 || m1.level < 0.01) throw new Error('bob does not hear the music')
+  // bob queues a link with /play: his own app fetches it, alice's never contacts the site
+  const toneURL = claudeURL + '/music/tone.wav'
+  await openChannel(bob, 'general')
+  await bob.locator('.composer textarea').fill('/play ' + claudeURL + '/blog')
+  await bob.keyboard.press('Enter')
+  await bob.locator('.toast', { hasText: 'web page' }).waitFor({ timeout: 10000 })
+  await bob.locator('.composer textarea').fill('/play ' + toneURL)
+  await bob.keyboard.press('Enter')
+  await bob.locator('.toast', { hasText: 'tone' }).waitFor({ timeout: 10000 })
+  await alice.waitForFunction(() => {
+    const g = window.__od.model.groupsList().find(x => !x.dm)
+    return window.__od.music.queue(g, window.__od.voice.active?.ch).next.some(e => e.t === 'tone')
+  }, null, { timeout: 10000 })
+  await bob.locator('.vp-status').click()
+  await bob.locator('.call-controls .music-toggle').click()
+  await bob.locator('.music-panel .mp-item', { hasText: 'tone' }).waitFor({ timeout: 5000 })
+  await settle(bob)
+  await shot(bob, '60-music')
+  // bob skips alice's song: hers ends on her PC, then bob's app starts his
+  await bob.locator('.music-panel .mp-now button[title="Skip this song"]').click()
+  await alice.waitForFunction(() => {
+    const g = window.__od.model.groupsList().find(x => !x.dm)
+    const now = window.__od.music.queue(g, window.__od.voice.active?.ch).now
+    return now?.t === 'tone' && !now.paused
+  }, null, { timeout: 15000 })
+  const a0 = await musicIn(alice)
+  await alice.waitForTimeout(1500)
+  const a1 = await musicIn(alice)
+  console.log(`   alice hears bob's link: ${a1.bytes - a0.bytes} bytes in 1.5 s, level ${a1.level.toFixed(2)}`)
+  if (a1.bytes - a0.bytes < 2000 || a1.level < 0.01) throw new Error('alice does not hear the music from the link')
+  // alice pauses bob's song for everyone, then takes it out (it's bob's: a skip asks his app)
+  await alice.locator('.music-tile button[title="Pause"]').click()
+  await bob.waitForFunction(() => window.__od.music.cur?.el.paused === true, null, { timeout: 10000 })
+  await alice.locator('.music-tile', { hasText: 'Paused' }).waitFor({ timeout: 10000 })
+  console.log('   queue on alice\'s side:', JSON.stringify(await queueOf(alice)))
+  await alice.locator('.music-tile button[title="Skip this song"]').click()
+  await bob.locator('.voice-user.music-bot').waitFor({ state: 'detached', timeout: 10000 })
+  await alice.locator('.music-tile').waitFor({ state: 'detached', timeout: 10000 })
+  await bob.keyboard.press('Escape')
+  if (await bob.evaluate(() => window.__od.music.sendTrack() !== null)) throw new Error('the music track is still sent after the queue ran out')
+
   step('muted: not a single audio packet leaves the PC')
   const sendsAudio = (page) => page.evaluate(() => [...window.__od.voice.calls.values()].some(c => c.pc.getSenders().some(s => s.track?.kind === 'audio')))
   const audioIn = (page) => page.evaluate(async () => {
@@ -946,6 +1068,12 @@ try {
   await alice.locator('.ctx-sub button', { hasText: 'Lounge' }).click()
   await bob.waitForFunction(() => window.__od.voice.active?.ch === 'lounge1', null, { timeout: 10000 })
   console.log('   bob was moved to Lounge')
+  // and back, by dragging him onto the other voice channel in the channel list
+  const lounge = alice.locator('.voice-block', { has: alice.getByRole('button', { name: 'Lounge', exact: true }) })
+  await lounge.locator('.voice-user', { hasText: 'Bob' }).waitFor({ timeout: 10000 })
+  await lounge.locator('.voice-user', { hasText: 'Bob' }).dragTo(alice.locator('.voice-block .channel', { hasText: 'General' }))
+  await bob.waitForFunction(() => !!window.__od.voice.active && window.__od.voice.active.ch !== 'lounge1', null, { timeout: 10000 })
+  console.log('   alice dragged bob back to General')
 
   step('leave call')
   await alice.locator('.call-controls .hangup').click()

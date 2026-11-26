@@ -1,10 +1,13 @@
 import { useState, useEffect } from '../vendor/preact-htm.js'
 import { Model } from './model.js'
 import { Voice } from './voice.js'
+import { MusicBot } from './music.js'
 
 export const api = window.od
 export const model = new Model()
 export const voice = new Voice({ api, model })
+export const music = new MusicBot({ api, model, voice })
+voice.music = music
 
 export const COLORS = ['#2dd4bf', '#f472b6', '#fbbf24', '#60a5fa', '#a78bfa', '#f87171', '#4ade80', '#fb923c']
 

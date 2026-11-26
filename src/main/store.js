@@ -110,6 +110,8 @@ const DEFAULT_SETTINGS = {
   claude: { model: 'claude-opus-5-5', web: false },
   // Join/leave/mute chimes and the soundboard
   sounds: { volume: 0.6, voice: true, soundboard: true, soundboardVolume: 0.7 },
+  // The music bot in calls (the Music app): one volume for every song, whoever plays it
+  music: { volume: 0.5, muted: false },
   // What friends see: 'online' | 'away' | 'invisible' (appear offline). Online turns to away
   // after autoAway minutes without input (0 = never).
   status: 'online',

@@ -844,6 +844,9 @@ function SoundSettings () {
     <label>Sound volume
       <input type="range" min="0" max="1" step="0.05" value=${s.volume ?? 0.6} onInput=${(e) => { model.settings.sounds = { ...s, volume: +e.target.value } }} onChange=${(e) => { set({ volume: +e.target.value }); playTone('join') }} />
     </label>
+    <label>Music bot volume
+      <input type="range" min="0" max="1" step="0.05" value=${model.settings.music?.volume ?? 0.5} onInput=${(e) => voice.setMusicVolume(+e.target.value)} onChange=${(e) => saveSettings({ music: { volume: +e.target.value } }).then(() => voice.applyOutputDevice())} />
+    </label>
     <${Toggle} label="Soundboard" hint="Hear clips people play from the soundboard in your calls (and show the soundboard button)" checked=${s.soundboard !== false} onChange=${(v) => set({ soundboard: v })} />
     ${s.soundboard !== false && html`
       <label>Soundboard volume
@@ -906,8 +909,28 @@ function NetworkSettings () {
       </select>
     </label>
     <p class="hint">Keeping copies means friends can still get a file when the original sender is offline.</p>
+    <${StartupSettings} />
     <${Toggle} label="Keep running in the tray when closed" hint="Stay online so friends can sync messages and files from you" checked=${st.closeToTray} onChange=${(v) => saveSettings({ closeToTray: v })} />
     <${Toggle} label="Desktop notifications" checked=${st.notifications} onChange=${(v) => saveSettings({ notifications: v })} />`
+}
+
+// Start with the computer: the operating system keeps that setting, so it's read from there
+function StartupSettings () {
+  const [st, setSt] = useState(null)
+  useEffect(() => { api.autostart().then(setSt, () => setSt({ supported: false })) }, [])
+  if (!st) return null
+  const mac = model.platform === 'darwin'
+  const label = mac ? 'Open OpenDiscord when you log in' : 'Start OpenDiscord with Windows'
+  if (!st.supported) return html`<p class="hint">${label}: only an installed copy of OpenDiscord can start with your computer.</p>`
+  const set = async (patch) => {
+    const r = await act(() => api.setAutostart({ enabled: st.enabled, hidden: st.hidden, ...patch }))
+    if (r) setSt(r)
+  }
+  return html`
+    <${Toggle} label=${label} hint="So friends can reach you and sync messages from you without you opening it" checked=${st.enabled} onChange=${(v) => set({ enabled: v })} />
+    ${st.enabled && st.canHide && html`<${Toggle} label="Start in the background" hint="Only the tray icon appears; click it to open the window" checked=${st.hidden} onChange=${(v) => set({ hidden: v })} />`}
+    ${st.blocked && html`<p class="hint warn-text">Windows has it switched off: Task Manager → Startup apps → OpenDiscord → Enable (or switch it off and on here).</p>`}
+    ${st.approval && html`<p class="hint warn-text">macOS needs you to allow it: System Settings → General → Login Items → OpenDiscord.</p>`}`
 }
 
 const CLEAN_DAYS = [[0, 'Never'], [7, 'After 7 days'], [30, 'After 30 days'], [90, 'After 90 days']]

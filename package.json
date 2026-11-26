@@ -1,7 +1,7 @@
 {
   "name": "opendiscord",
   "productName": "OpenDiscord",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Serverless, end-to-end encrypted P2P chat, voice and screen sharing for a small group of friends",
   "main": "src/main/main.js",
   "private": true,

@@ -1,12 +1,13 @@
 import { html, useState, useEffect, useRef } from '../vendor/preact-htm.js'
-import { model, voice, act, append } from '../lib/core.js'
+import { model, voice, music, act, append } from '../lib/core.js'
 import { MAX_FOLDER_DEPTH } from '../lib/model.js'
 import { APPS } from '../lib/apps.js'
 import { Icon } from '../lib/icons.js'
 import { Avatar, leaveGroupFlow } from './chat.js'
 import { myOpenTasks, eventsToday } from './planner.js'
 import { participantsOf, viewersOf, MuteIcons } from './stage.js'
-import { openMemberMenu } from './members.js'
+import { openMemberMenu, memberDragProps, voiceDropProps } from './members.js'
+import { MusicRow, musicOn } from './music.js'
 
 // ---------------------------------------------------------------- folded folders (per device)
 
@@ -109,7 +110,8 @@ const dropTarget = (mark, onDrop) => ({
     if (!e.currentTarget.classList.contains('drop-' + mark)) { clearMarks(); e.currentTarget.classList.add('drop-' + mark) }
   },
   onDragLeave: (e) => { if (!e.currentTarget.contains(e.relatedTarget)) e.currentTarget.classList.remove('drop-' + mark) },
-  onDrop: (e) => { e.preventDefault(); e.stopPropagation(); clearMarks(); onDrop() }
+  // a person dragged onto a voice channel is handled by the channel (members.js voiceDropProps)
+  onDrop: (e) => { if (!dragging) return; e.preventDefault(); e.stopPropagation(); clearMarks(); onDrop() }
 })
 
 // ---------------------------------------------------------------- group menu
@@ -265,13 +267,14 @@ function TextRow ({ view, c, folder = null }) {
 function VoiceRow ({ view, c, folder = null }) {
   const { g } = view
   const keys = participantsOf(g, c.id)
+  const q = musicOn(g) && keys.length ? music.queue(g, c.id) : null
   const openVoice = () => {
     model.ui.stage = { gid: g.id, ch: c.id }
     model.emit()
     if (!voice.inChannel(g.id, c.id) && !g.kickedMe) act(() => voice.join(g.id, c.id))
   }
   return html`
-    <div>
+    <div class="voice-block" ...${voiceDropProps(g, c)}>
       <button class="channel ${view.stage?.id === c.id ? 'active' : ''} ${voice.inChannel(g.id, c.id) ? 'connected' : ''}" onClick=${openVoice}
         ...${draggable('ch', c.id)} ...${dropTarget('before', () => moveTo(g, folder, c))}>
         <${Icon} name="speaker" size=${18} class="dim" /><span class="ch-name">${c.name}</span>
@@ -282,9 +285,11 @@ function VoiceRow ({ view, c, folder = null }) {
         const st = me ? voice.statePayload() : g.voice.get(k) || {}
         const watches = (st.watch || []).filter(w => keys.includes(w))
         const viewers = st.screen ? viewersOf(g, c.id, k).length : 0
+        const drag = memberDragProps(g, k)
+        const hint = drag.draggable ? (me ? ' · drag to another voice channel to switch' : ' · drag to another voice channel to move them') : ''
         return html`
-          <div key=${k} class="voice-user ${voice.speaking.has(k) ? 'speaking' : ''}" onClick=${(e) => clickVoiceUser(e, g, c, k, st)} onContextMenu=${(e) => openMemberMenu(e, g, k)}
-            title=${st.screen ? (me ? 'Show your stream' : `Watch ${model.memberName(g, k)}'s stream`) : 'Profile · right-click for options'}>
+          <div key=${k} class="voice-user ${voice.speaking.has(k) ? 'speaking' : ''} ${drag.draggable ? 'movable' : ''}" onClick=${(e) => clickVoiceUser(e, g, c, k, st)} onContextMenu=${(e) => openMemberMenu(e, g, k)}
+            ...${drag} title=${(st.screen ? (me ? 'Show your stream' : `Watch ${model.memberName(g, k)}'s stream`) : 'Profile · right-click for options') + hint}>
             <${Avatar} name=${model.memberName(g, k)} color=${model.memberColor(g, k)} src=${model.memberAvatar(g, k)} size=${22} speaking=${voice.speaking.has(k)} />
             <span class="vu-name">${model.memberName(g, k)}</span>
             ${watches.length > 0 && html`<span class="vu-watch" title=${'Watching ' + watches.map(w => w === model.me.key ? 'your' : model.memberName(g, w) + "'s").join(', ') + ' stream'}><${Icon} name="eye" size=${13} /></span>`}
@@ -293,6 +298,7 @@ function VoiceRow ({ view, c, folder = null }) {
             <${MuteIcons} g=${g} k=${k} st=${st} />
           </div>`
       })}
+      ${q && (q.now || q.next.length > 0) && html`<${MusicRow} g=${g} c=${c} q=${q} />`}
     </div>`
 }
 

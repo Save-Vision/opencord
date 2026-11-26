@@ -1030,3 +1030,82 @@ test('live preview: clicking a checkbox ticks it in the text', () => {
   assert.strictEqual(md.toggleTask(doc, 2, 3), doc) // only this block's checkboxes
   assert.strictEqual(md.toggleTask(doc, 6, 0), doc.replace('- [ ] other', '- [x] other'))
 })
+
+// ---------------------------------------------------------------- 0.8: the music bot
+
+const musicLib = await import('../src/renderer/lib/music.js')
+
+test('music: a queue part from someone\'s voice state is checked before it is used', () => {
+  const { cleanMusic, MAX_QUEUE } = musicLib
+  assert.strictEqual(cleanMusic(null), null)
+  assert.strictEqual(cleanMusic({ q: [] }), null)
+  assert.strictEqual(cleanMusic({ q: 'nope' }), null)
+  const m = cleanMusic({
+    q: [
+      { id: 'a1', t: 'x'.repeat(500), d: 200.4, at: 10, src: 'link' },
+      { id: 'a1', t: 'duplicate', at: 11 },
+      { id: 'a2', t: '', d: -5, at: 12, src: 'evil' },
+      { id: 'a3', t: 'no time' },
+      'junk'
+    ],
+    play: { id: 'a2', pos: 3.5, paused: 1 }
+  }, 1000)
+  assert.deepStrictEqual(m.q.map(e => e.id), ['a1', 'a2'])
+  assert.strictEqual(m.q[0].t.length, 120)
+  assert.strictEqual(m.q[0].d, 200)
+  assert.strictEqual(m.q[1].t, 'Untitled')
+  assert.strictEqual(m.q[1].d, null)
+  assert.strictEqual(m.q[1].src, 'file')
+  assert.deepStrictEqual(m.play, { id: 'a2', pos: 3.5, paused: true, recv: 1000 })
+  // playing something that isn't in the queue counts as nothing playing
+  assert.strictEqual(cleanMusic({ q: [{ id: 'b', at: 1 }], play: { id: 'zzz', pos: 1 } }).play, null)
+  const many = cleanMusic({ q: Array.from({ length: 60 }, (_, i) => ({ id: 'n' + i, at: i })) })
+  assert.strictEqual(many.q.length, MAX_QUEUE)
+})
+
+test('music: everyone works out the same queue, oldest first, one song at a time', () => {
+  const { channelQueue, cleanMusic, positionOf } = musicLib
+  const part = (key, q, play) => ({ key, music: cleanMusic({ q, play }, 5000) })
+  // nothing playing yet: the oldest song is next, whoever added it
+  let r = channelQueue([
+    part(A, [{ id: 'a1', t: 'A one', at: 300 }, { id: 'a2', t: 'A two', at: 100 }]),
+    part(B, [{ id: 'b1', t: 'B one', at: 200 }]),
+    { key: C, music: null }
+  ])
+  assert.strictEqual(r.now, null)
+  assert.deepStrictEqual(r.next.map(e => e.by + ':' + e.id), [A + ':a2', B + ':b1', A + ':a1'])
+  // the same parts in another order give the same queue (each app sees them differently)
+  const again = channelQueue([part(B, [{ id: 'b1', t: 'B one', at: 200 }]), part(A, [{ id: 'a1', t: 'A one', at: 300 }, { id: 'a2', t: 'A two', at: 100 }])])
+  assert.deepStrictEqual(again.next.map(e => e.id), r.next.map(e => e.id))
+  // B plays: that's what's on, and the rest stays in order
+  r = channelQueue([
+    part(A, [{ id: 'a1', at: 300 }, { id: 'a2', at: 100 }]),
+    part(B, [{ id: 'b1', at: 200, d: 180 }], { id: 'b1', pos: 30 })
+  ])
+  assert.strictEqual(r.now.by, B)
+  assert.strictEqual(r.now.id, 'b1')
+  assert.deepStrictEqual(r.next.map(e => e.id), ['a2', 'a1'])
+  // its position moves on with the clock, and stands still while paused
+  assert.strictEqual(positionOf(r.now, 5000 + 10000), 40)
+  assert.strictEqual(positionOf({ ...r.now, paused: true }, 5000 + 10000), 30)
+  assert.strictEqual(positionOf(r.now, 5000 + 10 * 60 * 1000), 180)
+  // two apps happened to start at once: the older song counts, the other one waits
+  r = channelQueue([
+    part(A, [{ id: 'a2', at: 100 }], { id: 'a2', pos: 1 }),
+    part(B, [{ id: 'b1', at: 200 }], { id: 'b1', pos: 2 })
+  ])
+  assert.strictEqual(r.now.id, 'a2')
+  assert.deepStrictEqual(r.next.map(e => e.id), ['b1'])
+  assert.strictEqual(musicLib.fmtDuration(65), '1:05')
+  assert.strictEqual(musicLib.fmtDuration(3725), '1:02:05')
+})
+
+test('music: the Music app is added like the others and starts switched off', () => {
+  seq = { [A]: 0, [B]: 0, [C]: 0 }
+  const m = makeModel()
+  const g = m.groups.get('g1')
+  assert.strictEqual(m.appOn(g, 'music'), false)
+  m.applyOps('g1', [raw('group.settings', A, m.settingsWith(g, { apps: ['music', 'calendar', 'chess-o-matic'] }), 20)])
+  assert.strictEqual(m.appOn(g, 'music'), true)
+  assert.deepStrictEqual(m.groupSettings(g).apps, ['calendar', 'music'])
+})

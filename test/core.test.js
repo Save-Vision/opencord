@@ -560,3 +560,124 @@ test('versions: apps too far apart are told who has to update instead of half-sy
   assert.deepStrictEqual(oldSees.groups, [group.id])
   assert.strictEqual(old.net.onlinePeers().length, 0, 'no syncing across the gap')
 })
+
+test('start with the computer: what the app asks Windows for, and copies that aren\'t installed never ask', () => {
+  const { makeAutostart } = require('../src/main/startup')
+  const exe = 'C:\\Apps\\OpenDiscord.exe'
+  const calls = []
+  let entry = null
+  // Electron's app on Windows: an entry counts only with the same program and arguments
+  const app = {
+    getLoginItemSettings: (o) => {
+      const on = !!entry && entry.path === o.path && JSON.stringify(entry.args) === JSON.stringify(o.args)
+      return { openAtLogin: on, executableWillLaunchAtLogin: on && !entry.off }
+    },
+    setLoginItemSettings: (o) => { calls.push(o); entry = o.openAtLogin ? { path: o.path, args: o.args } : null }
+  }
+  let settings = {}
+  const auto = makeAutostart({ app, platform: 'win32', exe, supported: true, settings: () => settings, saveSettings: (p) => { settings = { ...settings, ...p } } })
+  assert.deepStrictEqual(auto.info(), { supported: true, enabled: false, blocked: false, hidden: true, canHide: true })
+  let info = auto.set({ enabled: true })
+  assert.deepStrictEqual(calls.at(-1), { openAtLogin: true, path: exe, args: ['--hidden'], enabled: true })
+  assert.strictEqual(info.enabled, true)
+  info = auto.set({ enabled: true, hidden: false })
+  assert.deepStrictEqual(calls.at(-1).args, [])
+  assert.strictEqual(info.enabled, true)
+  assert.strictEqual(info.hidden, false)
+  entry.off = true // switched off in Task Manager
+  assert.strictEqual(auto.info().blocked, true)
+  assert.strictEqual(auto.set({ enabled: false }).enabled, false)
+  const never = () => assert.fail('a copy that is not installed must not touch the system')
+  const dev = makeAutostart({ app: { getLoginItemSettings: never, setLoginItemSettings: never }, supported: false, settings: () => ({}), saveSettings: never })
+  assert.deepStrictEqual(dev.info(), { supported: false })
+  assert.throws(() => dev.set({ enabled: true }), /installed/)
+})
+
+test('taskbar icon: an .ico of every size, and only this app\'s shortcuts point at it', () => {
+  const { buildIco, refreshShortcuts } = require('../src/main/startup')
+  const png = (n) => Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47]), Buffer.alloc(n - 4, 7)])
+  const ico = buildIco([{ size: 16, png: png(10) }, { size: 256, png: png(20) }])
+  assert.strictEqual(ico.readUInt16LE(2), 1) // an icon
+  assert.strictEqual(ico.readUInt16LE(4), 2) // two pictures
+  assert.strictEqual(ico.readUInt8(6), 16)
+  assert.strictEqual(ico.readUInt8(6 + 16), 0) // 256 px is written as 0
+  assert.strictEqual(ico.readUInt32LE(6 + 16 + 8), 20)
+  const at = ico.readUInt32LE(6 + 16 + 12)
+  assert.deepStrictEqual(ico.subarray(at, at + 4), Buffer.from([0x89, 0x50, 0x4e, 0x47]))
+  assert.strictEqual(ico.length, 6 + 32 + 10 + 20)
+  // small sizes as a classic bitmap: rows bottom-up, transparent pixels marked in the mask
+  const bgra = Buffer.from([1, 2, 3, 255, 0, 0, 0, 0, 4, 5, 6, 255, 7, 8, 9, 255]) // 2×2, top right transparent
+  const bmp = buildIco([{ size: 2, bgra }])
+  const b = bmp.subarray(bmp.readUInt32LE(6 + 12))
+  assert.strictEqual(bmp.readUInt32LE(6 + 8), b.length)
+  assert.strictEqual(b.readUInt32LE(0), 40)
+  assert.strictEqual(b.readInt32LE(8), 4) // twice the height: picture and mask
+  assert.deepStrictEqual([...b.subarray(40, 56)], [4, 5, 6, 255, 7, 8, 9, 255, 1, 2, 3, 255, 0, 0, 0, 0])
+  assert.deepStrictEqual([...b.subarray(56)], [0, 0, 0, 0, 0x40, 0, 0, 0])
+
+  const dir = fs.mkdtempSync(path.join(tmpRoot, 'lnk-'))
+  const links = { 'OpenDiscord.lnk': { target: 'C:\\Apps\\OpenDiscord.exe', icon: 'C:\\Apps\\OpenDiscord.exe' }, 'Other.lnk': { target: 'C:\\Other\\other.exe' } }
+  for (const n of [...Object.keys(links), 'notes.txt']) fs.writeFileSync(path.join(dir, n), '')
+  const shell = {
+    readShortcutLink: (f) => { const l = links[path.basename(f)]; if (!l) throw new Error('not a shortcut'); return { ...l } },
+    writeShortcutLink: (f, op, o) => { assert.strictEqual(op, 'update'); Object.assign(links[path.basename(f)], o); return true }
+  }
+  const file = 'C:\\Users\\x\\AppData\\Roaming\\OpenDiscord\\icons\\OpenDiscord-abc123.ico'
+  const changed = refreshShortcuts({ exe: 'c:\\apps\\opendiscord.exe', ico: file, dirs: [dir, path.join(dir, 'missing')], shell })
+  assert.deepStrictEqual(changed.map(f => path.basename(f)), ['OpenDiscord.lnk'])
+  assert.deepStrictEqual(links['OpenDiscord.lnk'], { target: 'C:\\Apps\\OpenDiscord.exe', icon: file, iconIndex: 0 })
+  assert.strictEqual(links['Other.lnk'].icon, undefined)
+  // already done: nothing to change (and Explorer isn't asked to reload icons again)
+  assert.deepStrictEqual(refreshShortcuts({ exe: 'C:\\Apps\\OpenDiscord.exe', ico: file, dirs: [dir], shell }), [])
+})
+
+test('music links: audio files and radio streams play, web pages and walled-off sites don\'t', async () => {
+  const { resolveMusicLink, MusicLinks, serveMusicLink } = require('../src/main/musiclink')
+  const pages = {
+    'https://radio.example/stream': { type: 'audio/mpeg', headers: { 'icy-name': 'Example FM' } },
+    'https://files.example/music/My%20Song.mp3': { type: 'audio/mpeg', headers: { 'content-length': '4' } },
+    'https://files.example/raw/track.flac': { type: 'application/octet-stream', headers: { 'content-length': '4' } },
+    'https://radio.example/listen.pls': { type: 'audio/x-scpls', body: '[playlist]\nNumberOfEntries=1\nFile1=https://radio.example/stream\n' },
+    'https://radio.example/live.m3u': { type: 'audio/x-mpegurl', body: '#EXTM3U\n#EXTINF:-1,Example\nhttps://radio.example/stream\n' },
+    'https://tv.example/index.m3u8': { type: 'application/vnd.apple.mpegurl', body: '#EXTM3U\n#EXT-X-VERSION:3\nchunk.ts\n' },
+    'https://blog.example/post': { type: 'text/html', body: '<html></html>' },
+    'https://gone.example/x.mp3': { type: 'text/html', status: 404 }
+  }
+  const asked = []
+  const fetch = async (url, o = {}) => {
+    asked.push({ url, range: o.headers?.range })
+    const p = pages[url]
+    if (!p) throw new Error('offline')
+    return new Response(p.body ?? 'data', { status: p.status || 200, headers: { 'content-type': p.type, ...p.headers } })
+  }
+  const r = (url) => resolveMusicLink(url, { fetch })
+  assert.deepStrictEqual(await r('https://radio.example/stream'), { url: 'https://radio.example/stream', title: 'Example FM', live: true })
+  assert.deepStrictEqual(await r('https://files.example/music/My%20Song.mp3'), { url: 'https://files.example/music/My%20Song.mp3', title: 'My Song', live: false })
+  assert.strictEqual((await r('https://files.example/raw/track.flac')).title, 'track')
+  assert.strictEqual((await r('https://radio.example/listen.pls')).url, 'https://radio.example/stream')
+  assert.strictEqual((await r('https://radio.example/live.m3u')).title, 'Example FM')
+  await assert.rejects(r('https://tv.example/index.m3u8'), /HLS/)
+  await assert.rejects(r('https://blog.example/post'), /web page/)
+  await assert.rejects(r('https://gone.example/x.mp3'), /404/)
+  await assert.rejects(r('https://offline.example/a.mp3'), /Couldn't reach/)
+  await assert.rejects(r('file:///C:/music/a.mp3'), /http/)
+  await assert.rejects(r('not a link'), /isn't a link/)
+  const before = asked.length
+  await assert.rejects(r('https://www.youtube.com/watch?v=abc'), /YouTube/)
+  await assert.rejects(r('https://open.spotify.com/track/abc'), /Spotify/)
+  assert.strictEqual(asked.length, before) // never contacted
+
+  // the page only gets audio, and only for links that were checked
+  const links = new MusicLinks()
+  const media = links.add('https://files.example/music/My%20Song.mp3')
+  assert.match(media, /^odweb:\/\/media\/[0-9a-f]{32}$/)
+  const req = (url, range) => ({ url, headers: new Headers(range ? { range } : {}) })
+  const ok = await serveMusicLink(req(media, 'bytes=2-'), { links, fetch })
+  assert.strictEqual(ok.status, 200)
+  assert.strictEqual(ok.headers.get('content-type'), 'audio/mpeg')
+  assert.strictEqual(ok.headers.get('access-control-allow-origin'), 'odapp://app')
+  assert.strictEqual(asked.at(-1).range, 'bytes=2-')
+  assert.strictEqual((await serveMusicLink(req('odweb://media/' + 'f'.repeat(32)), { links, fetch })).status, 404)
+  const page = links.add('https://blog.example/post')
+  assert.strictEqual((await serveMusicLink(req(page), { links, fetch })).status, 415)
+})

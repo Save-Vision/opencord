@@ -1,9 +1,10 @@
 import { html, useState, useEffect, useRef } from '../vendor/preact-htm.js'
 import { keyLabel } from '../lib/keys.js'
-import { model, voice, act, fmtRate, saveSettings } from '../lib/core.js'
+import { model, voice, music, act, fmtRate, saveSettings } from '../lib/core.js'
 import { Icon } from '../lib/icons.js'
 import { Avatar } from './chat.js'
-import { openMemberMenu } from './members.js'
+import { openMemberMenu, memberDragProps } from './members.js'
+import { MusicButton, MusicTile, musicOn } from './music.js'
 
 function Video ({ stream, muted = true, fit = 'contain', onDblClick }) {
   const ref = useRef()
@@ -223,7 +224,7 @@ export function VoiceStage ({ g, ch }) {
     people.push({
       id: k,
       el: html`
-        <div class="tile person ${voice.speaking.has(k) ? 'speaking' : ''}" onClick=${() => toggle(k)} onContextMenu=${(e) => openMemberMenu(e, g, k)}>
+        <div class="tile person ${voice.speaking.has(k) ? 'speaking' : ''}" onClick=${() => toggle(k)} onContextMenu=${(e) => openMemberMenu(e, g, k)} ...${memberDragProps(g, k)}>
           ${cam
             ? html`<${Video} stream=${cam} fit="cover" />`
             : html`<${Avatar} name=${name} color=${model.memberColor(g, k)} src=${model.memberAvatar(g, k)} size=${84} speaking=${voice.speaking.has(k)} />`}
@@ -243,6 +244,11 @@ export function VoiceStage ({ g, ch }) {
     })
   }
 
+  // the music bot sits in the call like a person while something is queued
+  if (musicOn(g)) {
+    const q = music.queue(g, ch.id)
+    if (q.now || q.next.length) people.push({ id: 'music', el: html`<${MusicTile} g=${g} q=${q} />` })
+  }
   const tiles = [...screens, ...people]
   const focused = focusId && tiles.find(t => t.id === focusId)
   const failed = [...voice.calls.values()].some(c => c.state === 'failed')
@@ -274,6 +280,7 @@ export function MuteIcons ({ g, k, st, size = 14 }) {
 }
 
 export function CallControls () {
+  const g = voice.active && model.groups.get(voice.active.gid)
   return html`
     <div class="call-controls">
       <button class="round ${voice.muted ? 'off' : ''}" title=${(voice.muted ? 'Unmute' : 'Mute') + ' (' + keyLabel('Ctrl+Shift+F9') + ')'} onClick=${() => voice.toggleMute()}>
@@ -289,6 +296,7 @@ export function CallControls () {
         onClick=${() => voice.local.screen ? voice.stopScreen() : model.openModal('screen')}>
         <${Icon} name="screenUp" size=${22} />
       </button>
+      ${g && html`<${MusicButton} g=${g} round />`}
       <button class="round hangup" title="Disconnect" onClick=${() => voice.leave()}><${Icon} name="leave" size=${22} /></button>
     </div>`
 }

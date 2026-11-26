@@ -1,5 +1,5 @@
 import { html, render, useEffect, useState, useRef } from './vendor/preact-htm.js'
-import { api, model, voice, useModel, initials, handleNewOps, onBlobProgress, retryMissingBlobs } from './lib/core.js'
+import { api, model, voice, music, useModel, initials, handleNewOps, onBlobProgress, retryMissingBlobs } from './lib/core.js'
 import { shortKey, HOME, DM_CALL } from './lib/model.js'
 import { Icon } from './lib/icons.js'
 import { loadClaudeInfo } from './lib/claude.js'
@@ -26,6 +26,8 @@ import { setIconStyle } from './lib/icons.js'
 import { DockLayout } from './views/dock.js'
 import { DocsView, FocusEditor } from './views/focus.js'
 import { setMac, mod } from './lib/keys.js'
+import { cleanMusic } from './lib/music.js'
+import { MusicButton, MusicPanel } from './views/music.js'
 
 // ---------------------------------------------------------------- shell
 
@@ -95,6 +97,7 @@ function App () {
     ${focusDoc && !model.docDeleted(g, focusDoc) && html`<${FocusEditor} key=${focusDoc.id} g=${g} doc=${focusDoc} />`}
     <${CallBanner} />
     <${MemberMenu} />
+    <${MusicPanel} />
     <${Modals} />
     <${UpdateRequired} />
     <${Toasts} />`
@@ -195,6 +198,7 @@ function VoicePanel () {
         <button class="btn ${voice.local.cam ? 'on' : ''}" onClick=${() => voice.toggleCamera()} title="Camera"><${Icon} name=${voice.local.cam ? 'camera' : 'cameraOff'} size=${18} /></button>
         <button class="btn ${voice.local.screen ? 'on' : ''}" onClick=${() => voice.local.screen ? voice.stopScreen() : model.openModal('screen')} title=${voice.local.screen ? 'Stop sharing' : 'Share screen'}><${Icon} name="screenUp" size=${18} /></button>
         ${g && !g.dm && html`<${SoundboardButton} g=${g} />`}
+        ${g && html`<${MusicButton} g=${g} />`}
         <button class="btn" onClick=${open} title="Open call view"><${Icon} name="maximize" size=${18} /></button>
       </div>
     </div>`
@@ -379,6 +383,7 @@ async function boot () {
       case 'voice': {
         const g = model.groups.get(gid)
         const was = g?.voice.get(from)?.ch
+        d.music = cleanMusic(d.music)
         model.setVoiceState(gid, from, d)
         voice.onRemoteVoiceState(gid, from, d)
         if (g?.dm === from && d.ch === DM_CALL && was !== DM_CALL && !voice.inChannel(gid, DM_CALL)) notifyCall(g)
@@ -392,6 +397,9 @@ async function boot () {
         break
       case 'move':
         voice.onMove(gid, from, d)
+        break
+      case 'music':
+        music.onRequest(gid, from, d)
         break
       case 'claude':
         model.setClaudeDraft(gid, from, d)
@@ -413,13 +421,20 @@ async function boot () {
     if (action === 'toggle-mute') voice.toggleMute()
     if (action === 'toggle-deafen') voice.toggleDeafen()
   })
+  // Escape with a dropdown's list open only closes that list (not the window or menu it's in)
+  window.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return
+    let open = false
+    try { open = !!document.querySelector('select:open') } catch {}
+    if (open) e.stopImmediatePropagation()
+  }, true)
   window.addEventListener('keydown', (e) => {
     if (mod(e) && e.shiftKey && e.key.toLowerCase() === 'm') { e.preventDefault(); voice.toggleMute() }
     if (mod(e) && e.key === ',') { e.preventDefault(); model.openModal('settings') }
     if (mod(e) && !e.shiftKey && e.key.toLowerCase() === 'f' && model.me?.name && !model.ui.modal) { e.preventDefault(); model.openSearch(model.ui.search?.q || '') }
   })
   window.addEventListener('beforeunload', () => voice.leave(true))
-  window.__od = { model, voice } // handy for poking around in DevTools (Ctrl+Shift+I)
+  window.__od = { model, voice, music } // handy for poking around in DevTools (Ctrl+Shift+I)
   startReminders({ api })
   loadClaudeInfo()
   startPresence()

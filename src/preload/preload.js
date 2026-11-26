@@ -37,6 +37,7 @@ contextBridge.exposeInMainWorld('od', {
   cleanStorage: (days) => invoke('storage:clean', days),
 
   linkPreview: (url) => invoke('link:preview', url),
+  musicLink: (url) => invoke('music:link', url),
 
   claudeInfo: () => invoke('claude:info'),
   claudeSetKey: (key) => invoke('claude:set-key', key),
@@ -72,6 +73,8 @@ contextBridge.exposeInMainWorld('od', {
 
   screenSources: () => invoke('screen:sources'),
   selectScreen: (id, audio) => invoke('screen:select', id, audio),
+  autostart: () => invoke('autostart:get'),
+  setAutostart: (o) => invoke('autostart:set', o),
   screenAccess: () => invoke('screen:access'),
   openScreenPrivacy: () => invoke('screen:privacy'),
 

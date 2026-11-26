@@ -19,6 +19,72 @@ export function openMemberMenu (e, g, key) {
 
 const closeMenu = () => { model.ui.menu = null; model.emit() }
 
+// ---------------------------------------------------------------- moving people between voice channels
+
+// The voice channel someone is in (null: none)
+function voiceChannelOf (g, k) {
+  if (k === model.me.key) return voice.active?.gid === g.id ? voice.active.ch : null
+  return g.voice.get(k)?.ch || null
+}
+
+// Move someone to another voice channel (ch) or disconnect them (ch = null). Yourself: just switch.
+// Their own app checks that you may (owner or admin, voice.onMove).
+export function moveMember (g, k, ch) {
+  if (k === model.me.key) {
+    if (!ch) return voice.leave()
+    const viewing = model.ui.stage?.gid === g.id
+    return act(() => voice.join(g.id, ch.id)).then(() => {
+      if (viewing && voice.inChannel(g.id, ch.id)) { model.ui.stage = { gid: g.id, ch: ch.id }; model.emit() }
+    })
+  }
+  const name = model.memberName(g, k)
+  api.sendEph(g.id, k, { type: 'move', ch: ch ? ch.id : null })
+  model.toast(ch ? `Moved ${name} to ${ch.name}` : `Disconnected ${name}`)
+}
+
+// Drag a person (in the channel list or a call tile) onto another voice channel: yourself to
+// switch channels, anyone else if you're the owner or an admin
+let dragged = null // { gid, key }
+
+const clearVoiceDrop = () => { for (const el of document.querySelectorAll('.voice-drop')) el.classList.remove('voice-drop') }
+
+export function memberDragProps (g, k) {
+  const me = k === model.me.key
+  if (g.dm || g.kickedMe || (!me && !model.canModerate(g, model.me.key, k))) return {}
+  return {
+    draggable: true,
+    onDragStart: (e) => {
+      dragged = { gid: g.id, key: k }
+      e.dataTransfer.effectAllowed = 'move'
+      e.dataTransfer.setData('text/od-member', k)
+      e.stopPropagation()
+    },
+    onDragEnd: () => { dragged = null; clearVoiceDrop() }
+  }
+}
+
+export function voiceDropProps (g, ch) {
+  const ok = () => !!dragged && dragged.gid === g.id && !!voiceChannelOf(g, dragged.key) && voiceChannelOf(g, dragged.key) !== ch.id
+  return {
+    onDragOver: (e) => {
+      if (!ok()) return
+      e.preventDefault()
+      e.dataTransfer.dropEffect = 'move'
+      if (!e.currentTarget.classList.contains('voice-drop')) { clearVoiceDrop(); e.currentTarget.classList.add('voice-drop') }
+    },
+    onDragLeave: (e) => { if (!e.currentTarget.contains(e.relatedTarget)) e.currentTarget.classList.remove('voice-drop') },
+    onDrop: (e) => {
+      if (!ok()) return
+      e.preventDefault()
+      e.stopPropagation()
+      const k = dragged.key
+      dragged = null
+      clearVoiceDrop()
+      moveMember(g, k, ch)
+    }
+  }
+}
+
 export function RoleBadge ({ g, k }) {
   const r = model.roleOf(g, k)
   if (r === 'owner') return html`<span class="role owner" title="Group owner"><${Icon} name="crown" size=${13} /></span>`
@@ -175,10 +241,7 @@ export function MemberMenu () {
     const op = await act(() => api.setRole(g.id, k, r))
     if (op) { model.applyOps(g.id, [op]); model.toast(r === 'admin' ? `${name} is now an admin` : `${name} is no longer an admin`) }
   }
-  const moveTo = (ch) => {
-    api.sendEph(g.id, k, { type: 'move', ch: ch ? ch.id : null })
-    model.toast(ch ? `Moved ${name} to ${ch.name}` : `Disconnected ${name}`)
-  }
+  const moveTo = (ch) => moveMember(g, k, ch)
   const targets = model.channelsOf(g, 'voice').filter(c => c.id !== vs?.ch)
   const pres = model.presence(g, k)
   const info = g.online.get(k)

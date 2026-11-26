@@ -13,6 +13,7 @@ import { GameCard } from './games.js'
 import { PollCard } from './polls.js'
 import { openMemberMenu } from './members.js'
 import { OutdatedBanner } from './compat.js'
+import { PlayInCall, musicCommand } from './music.js'
 import { keyLabel } from '../lib/keys.js'
 
 const drafts = new Map()
@@ -593,6 +594,7 @@ function Attachment ({ g, a, onLoad }) {
         ${st.state === 'fetching' && html`<div class="progress"><i style=${{ width: (pct || 2) + '%' }} /></div>`}
         ${have && AUD.test(a.m) && html`<audio src=${blobUrl(a)} controls preload="metadata" />`}
       </div>
+      ${have && AUD.test(a.m) && html`<${PlayInCall} g=${g} a=${a} />`}
       ${have
         ? html`<button class="icon-btn" title="Save to disk" onClick=${() => act(() => api.saveBlob(a.h, a.n))}><${Icon} name="download" /></button>`
         : st.state !== 'fetching' && html`<button class="icon-btn" title="Download from friends" onClick=${() => fetchBlob(a.h, g.id)}><${Icon} name="download" /></button>`}
@@ -707,6 +709,11 @@ function Composer ({ g, ch, handle, thread = null }) {
     if (/^\/poker\b/i.test(t) && !files.length) {
       setText('')
       model.openModal('newGame', { gid: g.id, ch: ch.id, kind: 'poker' })
+      return
+    }
+    if (/^\/(play|skip)\b/i.test(t) && !files.length) {
+      setText('')
+      musicCommand(g, t)
       return
     }
     if (/^\/poll\b/i.test(t) && !files.length && !thread) {

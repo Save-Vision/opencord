@@ -72,6 +72,10 @@ const ICONS = {
   stop: ['M6 6h12v12H6z'],
   poll: ['M4 20V10', 'M10 20V4', 'M16 20v-7', 'M22 20H2'],
   music: ['M9 18V5l12-2v13', [6, 18, 3], [18, 16, 3]],
+  // a record: the music bot
+  disc: [[12, 12, 9], [12, 12, 2.5], 'M16.8 7.2a6.5 6.5 0 0 1 1.5 2.6'],
+  pause: ['M7 5h3.5v14H7z', 'M13.5 5H17v14h-3.5z'],
+  skip: ['M5 5l10 7-10 7z', 'M19 5v14'],
   // two playing cards
   cards: ['M4 6.5 11 4l3.5 12.5-7 2.5z', 'M14 4.5h5a1 1 0 0 1 1 1V19a1 1 0 0 1-1 1h-4', 'M8.5 10.5l1 3'],
   moon: ['M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z'],
@@ -110,7 +114,7 @@ const STROKE = { line: 2, thin: 1.6, neon: 2.3, quiet: 1.5 }
 
 // XP colours: what the icon is about decides its colour, like the old Windows icon sets did
 const XP_HUE = {
-  green: ['mic', 'phone', 'check', 'play', 'speaker', 'headphones', 'camera', 'music', 'shield', 'shieldPlain', 'plus', 'userPlus', 'signal', 'download'],
+  green: ['mic', 'phone', 'check', 'play', 'speaker', 'headphones', 'camera', 'music', 'shield', 'shieldPlain', 'plus', 'userPlus', 'signal', 'download', 'disc', 'skip', 'pause'],
   yellow: ['folder', 'folderPlus', 'crown', 'zap', 'smile', 'lock', 'ticket', 'archive', 'clip', 'poll', 'cards', 'pin', 'inbox'],
   red: ['micOff', 'headphonesOff', 'cameraOff', 'volumeX', 'x', 'trash', 'leave', 'userX', 'stop', 'alert', 'flag', 'calendar'],
   gray: ['settings', 'edit', 'doc', 'focus', 'monitor', 'heading', 'bold', 'italic', 'strike', 'list', 'listOrdered', 'quote', 'table', 'minus', 'pencilLine', 'chess', 'clock', 'more', 'chevronDown', 'chevronRight', 'chevronLeft', 'flip', 'code'],

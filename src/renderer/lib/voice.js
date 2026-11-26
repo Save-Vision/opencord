@@ -3,9 +3,10 @@
 // in the media path to decrypt it). Signalling (SDP/ICE) travels over the already
 // encrypted + authenticated Hyperswarm connection, so it cannot be tampered with.
 //
-// Each connection has four fixed transceivers, negotiated once:
-//   0 mic audio · 1 screen video · 2 screen audio · 3 camera video
-// Starting/stopping a share is just replaceTrack(), no renegotiation round-trip.
+// Each connection has five fixed transceivers, negotiated once:
+//   0 mic audio · 1 screen video · 2 screen audio · 3 camera video · 4 music (the music bot, music.js)
+// Starting/stopping a share is just replaceTrack(), no renegotiation round-trip. Apps older than
+// 0.8 negotiate the first four only; they just don't hear the music.
 //
 // Screen shares are opt-in: nobody receives one until they click "Watch". Your voice state
 // lists whose streams you watch (`watch`), and a sharer only puts the screen tracks on the
@@ -18,7 +19,8 @@ const SLOTS = [
   { name: 'mic', kind: 'audio' },
   { name: 'screen', kind: 'video' },
   { name: 'screenAudio', kind: 'audio' },
-  { name: 'cam', kind: 'video' }
+  { name: 'cam', kind: 'video' },
+  { name: 'music', kind: 'audio' }
 ]
 
 export const SCREEN_PRESETS = {
@@ -199,6 +201,7 @@ export class Voice {
     this.watching.clear()
     clearInterval(this.meterTimer)
     clearInterval(this.statsTimer)
+    this.music?.clear()
     this.api.sendEph(gid, null, { type: 'voice', ch: null })
     this.api.voiceHotkeys(false)
     if (!silent) playTone('leave')
@@ -218,7 +221,8 @@ export class Voice {
       screenLabel: this.screenOpts ? SCREEN_PRESETS[this.screenOpts.preset]?.label : null,
       screenAudio: !!this.local.screen?.getAudioTracks().length,
       watch: [...this.watching],
-      cam: !!this.local.cam
+      cam: !!this.local.cam,
+      music: this.music?.payload()
     }
   }
 
@@ -266,6 +270,8 @@ export class Voice {
     }
     // Their share ended (or they left): stop watching, so a new share doesn't auto-connect
     if (this.watching.has(key) && !(st.ch === this.active.ch && st.screen)) this.unwatchScreen(key)
+    // the music queue may have moved on (or lost their songs)
+    this.music?.tick()
     this.model.emit()
   }
 
@@ -343,6 +349,7 @@ export class Voice {
     this._applyMute()
     this.reconcile()
     this.applyOutputDevice()
+    this.music?.tick()
     if (was !== undefined && was !== this.serverMuted) {
       this._broadcastState()
       playTone(this.serverMuted ? 'mute' : 'unmute')
@@ -365,7 +372,10 @@ export class Voice {
   onPeerOffline (gid, key) {
     const call = this.calls.get(key)
     if (call && this.active?.gid === gid) this._closeCall(call)
-    if (this.active?.gid === gid) this.unwatchScreen(key)
+    if (this.active?.gid === gid) {
+      this.unwatchScreen(key)
+      this.music?.tick()
+    }
   }
 
   onRtc (gid, key, msg) {
@@ -524,8 +534,17 @@ export class Voice {
       (this.micLive && this.local.mic?.getAudioTracks()[0]) || null,
       (withScreen && this.local.screen?.getVideoTracks()[0]) || null,
       (withScreen && this.local.screen?.getAudioTracks()[0]) || null,
-      this.local.cam?.getVideoTracks()[0] || null
+      this.local.cam?.getVideoTracks()[0] || null,
+      this.music?.sendTrack() || null
     ]
+  }
+
+  // The music bot started or stopped a song of mine
+  refreshTracks () {
+    for (const call of this.calls.values()) {
+      this._attachLocalTracks(call)
+      this._applySenderParams(call, 4)
+    }
   }
 
   // The screen tracks only go to people who are watching
@@ -558,7 +577,7 @@ export class Voice {
         : 'maintain-framerate'
       const codec = pickCodec(params.codecs, this.screenCodec())
       if (codec) enc.codec = codec
-    } else if (i === 2) {
+    } else if (i === 2 || i === 4) {
       enc.maxBitrate = 160000
     } else if (i === 3) {
       enc.maxBitrate = 2500000
@@ -584,7 +603,7 @@ export class Voice {
     call.remoteStreams[slot] = new MediaStream([e.track])
     // remote tracks are "muted" until media arrives; the screen tile waits for that
     e.track.onmute = e.track.onunmute = () => this.model.emit()
-    if (slot === 'mic' || slot === 'screenAudio') {
+    if (slot === 'mic' || slot === 'screenAudio' || slot === 'music') {
       const el = new Audio()
       el.autoplay = true
       el.srcObject = call.remoteStreams[slot]
@@ -631,10 +650,22 @@ export class Voice {
 
   applyOutputDevice () {
     for (const call of this.calls.values()) for (const [slot, el] of Object.entries(call.audioEls)) this._applyOutput(call.key, el, slot)
+    this.music?.applyOutput()
   }
 
-  // A friend's voice and their stream's sound have separate volume and mute settings.
+  // A friend's voice and their stream's sound have separate volume and mute settings. The music
+  // bot has one volume for all songs, whoever plays them.
   _applyOutput (key, el, slot = 'mic') {
+    if (slot === 'music') {
+      const m = this.settings.music || {}
+      const g = this.active && this.model.groups.get(this.active.gid)
+      el.volume = Math.max(0, Math.min(1, m.volume ?? 0.5))
+      // the Music app has to be on in the group, and a moderator's mute silences music too
+      el.muted = this.deafened || !!m.muted || !g || !this.model.appOn(g, 'music') || this.model.isServerMuted(g, key)
+      const out = this.settings.audio.outputId
+      if (el.setSinkId && out) el.setSinkId(out === 'default' ? '' : out).catch(() => {})
+      return
+    }
     const screen = slot === 'screenAudio'
     const vol = screen ? this.settings.screenVolumes?.[key] : this.settings.volumes?.[key]
     el.volume = Math.max(0, Math.min(1, vol == null ? 1 : vol))
@@ -650,6 +681,12 @@ export class Voice {
   setVolume (key, vol, slot = 'mic') {
     const el = this.calls.get(key)?.audioEls[slot]
     if (el) el.volume = vol
+  }
+
+  // While dragging the music volume slider
+  setMusicVolume (vol) {
+    for (const call of this.calls.values()) if (call.audioEls.music) call.audioEls.music.volume = vol
+    if (this.music?.monitor) this.music.monitor.volume = vol
   }
 
   screenMuted (key) { return !!this.settings.screenMutes?.[key] }

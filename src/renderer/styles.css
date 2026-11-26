@@ -53,6 +53,23 @@ input, textarea, select {
 input:focus, textarea:focus, select:focus { border-color: var(--accent); }
 textarea { resize: vertical; }
 select { cursor: pointer; }
+/* Dropdowns are drawn by the app, not by Windows or macOS, so the open list has the theme's
+   colours too (a native list ignores them). Each theme restyles the list in themes.css. */
+select, ::picker(select) { appearance: base-select; }
+select { display: flex; align-items: center; gap: 8px; text-align: left; }
+select::picker-icon { margin-left: auto; color: var(--text-2); transition: rotate 0.15s; }
+select:open::picker-icon { rotate: 180deg; }
+::picker(select) {
+  margin: 4px 0; padding: 4px; max-height: min(340px, 55vh); overflow-y: auto;
+  background: var(--bg-0); color: var(--text-1); border: 1px solid var(--border); border-radius: 10px;
+  box-shadow: var(--menu-shadow, 0 16px 40px rgba(0, 0, 0, 0.55)); scrollbar-width: thin;
+}
+option { padding: 7px 10px; border-radius: 6px; gap: 8px; color: var(--text-1); background: transparent; white-space: normal; }
+option::checkmark { color: var(--accent); }
+option:checked { color: var(--text-0); font-weight: 600; }
+option:is(:hover, :focus-visible) { background: var(--accent); color: var(--accent-ink); outline: none; }
+option:is(:hover, :focus-visible)::checkmark { color: inherit; }
+option:disabled { color: var(--text-3); background: transparent; }
 .mono { font-family: var(--mono); font-size: 12.5px; }
 .muted { color: var(--text-2); }
 .dim { color: var(--text-3); }
@@ -139,6 +156,9 @@ kbd { background: var(--bg-4); border-radius: 4px; padding: 1px 5px; font: 11px 
 .voice-user { display: flex; align-items: center; gap: 8px; padding: 3px 8px 3px 30px; font-size: 13px; color: var(--text-2); border-radius: 6px; cursor: pointer; }
 .voice-user:hover { background: var(--bg-3); color: var(--text-1); }
 .voice-user.speaking { color: var(--text-0); }
+.voice-user.movable:active { cursor: grabbing; }
+.voice-block { border-radius: 8px; transition: background 0.12s, box-shadow 0.12s; }
+.voice-block.voice-drop { background: var(--accent-soft); box-shadow: inset 0 0 0 2px var(--accent); }
 .vu-name { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .live { background: var(--danger); color: #fff; font-size: 10px; font-weight: 800; padding: 1px 5px; border-radius: 4px; letter-spacing: 0.05em; }
 
@@ -160,7 +180,7 @@ kbd { background: var(--bg-4); border-radius: 4px; padding: 1px 5px; font: 11px 
 .vp-status.good { color: var(--ok); }
 .vp-status.warn { color: var(--warn); }
 .vp-status.bad { color: var(--danger); }
-.vp-actions { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-top: 8px; }
+.vp-actions { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); gap: 6px; margin-top: 8px; }
 .vp-actions .btn { height: 32px; padding: 0; justify-content: center; background: var(--bg-3); }
 .vp-actions .btn:hover { background: var(--bg-4); }
 
@@ -1195,7 +1215,7 @@ label.inline select { width: auto; }
 .poll-form .label, .add-sound .label { display: block; font-size: 12px; font-weight: 600; color: var(--text-2); margin: 4px 0 6px; }
 
 /* ---------------------------------------------------------------- soundboard */
-.vp-actions:has(.soundboard-anchor) { grid-template-columns: repeat(4, 1fr); }
+
 .soundboard-anchor { display: contents; }
 .soundboard-anchor > .btn { height: 32px; padding: 0; justify-content: center; background: var(--bg-3); }
 .soundboard { position: fixed; left: 80px; bottom: 150px; width: 320px; z-index: 150; background: var(--bg-0); border: 1px solid var(--border); border-radius: 12px; padding: 10px; box-shadow: 0 16px 40px rgba(0, 0, 0, 0.55); animation: rise 0.14s ease-out; }
@@ -1463,3 +1483,49 @@ html[data-theme=minimal] .ft-sep { background: var(--bg-4); }
 .mac-permission { display: flex; align-items: center; gap: 12px; padding: 10px 12px; margin-bottom: 12px; border-radius: 10px; background: var(--accent-soft); border: 1px solid var(--accent); color: var(--text-1); }
 .mac-permission > div { flex: 1; display: flex; flex-direction: column; gap: 2px; }
 .mac-permission small { color: var(--text-2); line-height: 1.35; }
+
+/* ---------------------------------------------------------------- music bot */
+.icon.spin { animation: spin 2.4s linear infinite; }
+.music-avatar { flex: none; width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; background: linear-gradient(135deg, #f472b6, #a78bfa); color: #fff; }
+.music-panel { position: fixed; right: 24px; bottom: 24px; z-index: 150; width: 380px; max-height: calc(100vh - 90px); display: flex; flex-direction: column; gap: 10px; padding: 12px; background: var(--bg-0); color: var(--text-1); border: 1px solid var(--border); border-radius: 14px; box-shadow: 0 16px 40px rgba(0, 0, 0, 0.55); animation: rise 0.14s ease-out; user-select: none; }
+.music-panel.dropping { outline: 2px dashed var(--accent); outline-offset: -6px; }
+.mp-head { display: flex; align-items: center; gap: 10px; }
+.mp-head .music-avatar { width: 30px; height: 30px; }
+.mp-head > div { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.mp-head b { color: var(--text-0); }
+.mp-head small { color: var(--text-3); font-size: 12px; }
+.mp-empty { padding: 14px 12px; border-radius: 10px; background: var(--bg-2); color: var(--text-2); font-size: 13px; text-align: center; }
+.mp-now { display: flex; align-items: center; gap: 12px; padding: 10px; border-radius: 12px; background: var(--bg-2); }
+.mp-disc { flex: none; width: 52px; height: 52px; border-radius: 50%; display: grid; place-items: center; background: radial-gradient(circle, #2a2d35 30%, #111 31%, #1b1d22 60%, #111 100%); color: #f472b6; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35); }
+.mp-meta { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.mp-meta b, .mp-meta span { color: var(--text-0); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mp-meta small { color: var(--text-3); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+.mp-bar { height: 4px; margin-top: 5px; border-radius: 2px; background: var(--bg-4); overflow: hidden; }
+.mp-bar i { display: block; height: 100%; background: linear-gradient(90deg, #f472b6, #a78bfa); transition: width 0.9s linear; }
+.mp-ctl { display: flex; gap: 2px; }
+.mp-queue { display: flex; flex-direction: column; gap: 2px; overflow-y: auto; min-height: 0; max-height: 260px; }
+.mp-label { font-size: 11.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-3); padding: 2px 4px 4px; }
+.mp-item { display: flex; align-items: center; gap: 10px; padding: 6px 6px 6px 4px; border-radius: 8px; }
+.mp-item:hover { background: var(--bg-2); }
+.mp-item .mp-meta span { font-size: 13.5px; }
+.mp-n { width: 20px; text-align: center; color: var(--text-3); font-size: 12px; font-variant-numeric: tabular-nums; }
+.mp-add .btn { width: 100%; justify-content: center; }
+.mp-link { display: flex; gap: 6px; }
+.mp-link input { flex: 1; min-width: 0; }
+.mp-foot { display: flex; align-items: center; gap: 8px; }
+.mp-foot input[type=range] { flex: 1; }
+.mp-note { color: var(--text-3); font-size: 11.5px; line-height: 1.45; }
+.music-panel .hint { margin: 0; }
+.music-tile { background: linear-gradient(135deg, color-mix(in srgb, #f472b6 16%, var(--bg-1)), color-mix(in srgb, #a78bfa 16%, var(--bg-1))); padding: 0 18px 30px; }
+.music-tile .mp-now { width: 100%; max-width: 440px; background: transparent; padding: 0; }
+.music-tile .mp-disc { width: 64px; height: 64px; }
+.music-tile.playing { outline-color: color-mix(in srgb, #f472b6 60%, transparent); }
+.mp-now.compact .mp-ctl .icon-btn { background: rgba(0, 0, 0, 0.2); }
+.voice-user.music-bot { color: var(--text-1); }
+.voice-user.music-bot .vu-name small { color: var(--text-3); margin-left: 4px; }
+.eq { display: inline-flex; align-items: flex-end; gap: 2px; height: 12px; }
+.eq i { width: 3px; background: #f472b6; border-radius: 1px; animation: eq 0.9s ease-in-out infinite; }
+.eq i:nth-child(2) { animation-delay: -0.3s; }
+.eq i:nth-child(3) { animation-delay: -0.6s; }
+@keyframes eq { 0%, 100% { height: 3px; } 50% { height: 12px; } }
+@media (prefers-reduced-motion: reduce) { .icon.spin, .eq i { animation: none; } }

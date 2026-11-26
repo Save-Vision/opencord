@@ -1,7 +1,8 @@
 'use strict'
 const {
   app, BrowserWindow, ipcMain, protocol, session, desktopCapturer, shell, dialog,
-  Tray, Menu, nativeImage, clipboard, globalShortcut, safeStorage, powerMonitor, nativeTheme, systemPreferences
+  Tray, Menu, nativeImage, clipboard, globalShortcut, safeStorage, powerMonitor, nativeTheme, systemPreferences,
+  net: electronNet
 } = require('electron')
 const path = require('path')
 const { attachContextMenu } = require('./contextmenu')
@@ -15,6 +16,9 @@ const { linkPreview } = require('./linkpreview')
 const { Claude } = require('./claude')
 const poker = require('./poker')
 const c = require('./crypto')
+const { HIDDEN_ARG, makeAutostart, updateWindowsIcons } = require('./startup')
+const { resolveMusicLink, MusicLinks, serveMusicLink } = require('./musiclink')
+const { execFile } = require('child_process')
 
 // --profile=name runs an isolated instance (own identity + data). Handy for testing
 // several "friends" on one PC.
@@ -58,8 +62,11 @@ const mimeFor = (p) => MIME[path.extname(p).toLowerCase()]?.split(';')[0] || 'ap
 
 protocol.registerSchemesAsPrivileged([
   { scheme: 'odapp', privileges: { standard: true, secure: true, supportFetchAPI: true } },
-  { scheme: 'odblob', privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true, stream: true } }
+  { scheme: 'odblob', privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true, stream: true } },
+  // music links the music bot plays (musiclink.js)
+  { scheme: 'odweb', privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true, stream: true } }
 ])
+const musicLinks = new MusicLinks()
 
 let win = null
 let tray = null
@@ -70,9 +77,21 @@ let claude = null
 let quitting = false
 let pendingScreen = null
 let accountNote = null // { kind: 'locked', folder }: the old account couldn't be unlocked on this PC
+let autostart = null
 // Tests run with OD_DATA_DIR; some test-only switches below only work then
 const TESTING = !!process.env.OD_DATA_DIR
 const testInt = (name) => TESTING && /^\d+$/.test(process.env[name] || '') ? Number(process.env[name]) : undefined
+// Started with the computer "in the background": only the tray icon until it's clicked
+let launchHidden = process.argv.includes(HIDDEN_ARG)
+// The .exe the user actually runs (the portable one unpacks itself to a temp folder first)
+const appExe = () => process.env.PORTABLE_EXECUTABLE_FILE || process.execPath
+// Only an installed copy touches the system; tests get a stand-in that only remembers the choice
+const systemApp = () => app.isPackaged && !TESTING && !profile
+const fakeLogin = {
+  on: false,
+  getLoginItemSettings () { return { openAtLogin: this.on, executableWillLaunchAtLogin: this.on } },
+  setLoginItemSettings (o) { this.on = !!o.openAtLogin }
+}
 
 // opendiscord:// links (one-time invites and friend links). Clicking one starts the app, or
 // hands the link to the running one (second-instance on Windows/Linux, open-url on macOS).
@@ -159,6 +178,19 @@ async function boot () {
   nativeTheme.on('updated', () => { if (store.settings.mode === 'system') applyChrome() })
   createTray()
   registerLinkHandler()
+  autostart = makeAutostart({
+    app: TESTING ? fakeLogin : app,
+    platform: TESTING ? 'win32' : process.platform,
+    exe: appExe(),
+    supported: TESTING || (systemApp() && (process.platform === 'win32' || process.platform === 'darwin')),
+    settings: () => store.settings,
+    saveSettings: (patch) => store.setSettings(patch)
+  })
+  if (process.platform === 'win32' && systemApp()) {
+    setTimeout(() => {
+      try { updateWindowsIcons({ app, shell, nativeImage, iconPng: ICON, exe: appExe(), execFile }) } catch (err) { console.warn('[icons]', err.message) }
+    }, 8000).unref?.()
+  }
   updater.start()
   await net.start()
   startMaintenance()
@@ -196,8 +228,9 @@ async function openDataDir () {
 function relaunch () {
   quitting = true
   // The portable .exe runs from a temp folder; restart the .exe the user actually opened.
+  // Started with the computer in the background or not, the restarted app shows its window.
   const exe = process.env.PORTABLE_EXECUTABLE_FILE
-  app.relaunch(exe ? { execPath: exe, args: process.argv.slice(1) } : undefined)
+  app.relaunch({ execPath: exe || process.execPath, args: process.argv.slice(1).filter(a => a !== HIDDEN_ARG) })
   app.quit()
 }
 
@@ -273,7 +306,12 @@ function createWindow () {
     }
   })
   win.loadURL('odapp://app/index.html' + (profile ? '?profile=' + encodeURIComponent(profile) : ''))
-  win.once('ready-to-show', () => win.show())
+  win.once('ready-to-show', () => {
+    // started with the computer in the background: stay in the tray until clicked
+    const hidden = launchHidden && tray
+    launchHidden = false
+    if (!hidden) win.show()
+  })
   win.on('close', (e) => {
     if (!quitting && tray && store.settings.closeToTray) { e.preventDefault(); win.hide() }
   })
@@ -332,6 +370,8 @@ function registerProtocols () {
       return new Response('Not found', { status: 404 })
     }
   })
+
+  protocol.handle('odweb', (req) => serveMusicLink(req, { links: musicLinks, fetch: (url, o) => electronNet.fetch(url, o) }))
 
   // odblob://file/<sha256>?type=image/png — serves files from the local blob store,
   // with Range support so audio/video attachments can be scrubbed.
@@ -651,6 +691,12 @@ function registerIpc () {
       }))
   })
   // macOS: "Screen Recording" permission ('granted', 'denied', 'not-determined', …)
+  handle('music:link', async (url) => {
+    const r = await resolveMusicLink(url, { fetch: (u, o) => electronNet.fetch(u, o) })
+    return { url: musicLinks.add(r.url), title: r.title, live: r.live }
+  })
+  handle('autostart:get', () => autostart.info())
+  handle('autostart:set', (o) => autostart.set({ enabled: !!o?.enabled, hidden: o?.hidden }))
   handle('screen:access', () => process.platform === 'darwin' ? systemPreferences.getMediaAccessStatus('screen') : 'granted')
   handle('screen:privacy', () => {
     if (process.platform === 'darwin') shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture')

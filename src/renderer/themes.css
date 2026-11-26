@@ -80,7 +80,7 @@ html.vt-docks .dock-side { view-transition-name: dock-side; }
 .rail-btn:hover, .rail-item.active .rail-btn { border-radius: 10px; }
 .rail-btn .badge, .rail-voice { box-shadow: 0 0 0 3px var(--app-bg); }
 .rail-item .pill { left: -2px; }
-:is(.dropdown, .ctx-menu, .status-menu, .emoji-panel, .pins-panel, .soundboard, .emoji-suggest) { box-shadow: var(--menu-shadow); }
+:is(.dropdown, .ctx-menu, .status-menu, .emoji-panel, .pins-panel, .soundboard, .emoji-suggest, .music-panel) { box-shadow: var(--menu-shadow); }
 
 /* ---------------------------------------------------------------- logo */
 .logo { display: block; flex: none; }
@@ -209,7 +209,7 @@ html[data-theme=minimal][data-mode=dark] {
 html[data-theme=minimal] .titlebar { background: var(--app-bg); }
 html[data-theme=minimal] .logo-dot { display: none; }
 html[data-theme=minimal] :is(.group-header, .chat-header, .thread-panel > header, .search-panel > header, .user-panel, .voice-panel, .modal > footer, .settings nav, .tabs) { border-color: transparent !important; }
-html[data-theme=minimal] :is(.modal, .dropdown, .ctx-menu, .status-menu, .emoji-panel, .pins-panel, .soundboard, .call-banner, .att-file, .net-item, .emoji-suggest) { border: 0 !important; }
+html[data-theme=minimal] :is(.modal, .dropdown, .ctx-menu, .status-menu, .emoji-panel, .pins-panel, .soundboard, .music-panel, .call-banner, .att-file, .net-item, .emoji-suggest) { border: 0 !important; }
 html[data-theme=minimal] .modal { box-shadow: var(--menu-shadow); }
 html[data-theme=minimal] .modal > footer { background: transparent; }
 html[data-theme=minimal] :is(.group-header h1, .chat-header h2) { font-weight: 600; }
@@ -226,6 +226,7 @@ html[data-theme=minimal] .btn.primary { background: var(--accent); color: var(--
 html[data-theme=minimal] .btn:hover:not(:disabled) { filter: none; background: var(--bg-4); opacity: 0.85; }
 html[data-theme=minimal] .btn.primary:hover:not(:disabled) { background: var(--accent-hover); opacity: 1; }
 html[data-theme=minimal] :is(input, textarea, select) { border: 0; background: var(--bg-3); }
+html[data-theme=minimal] ::picker(select) { border: 0; }
 html[data-theme=minimal] :is(input, textarea, select):focus { background: var(--bg-4); }
 html[data-theme=minimal] .composer { background: var(--bg-3); border-radius: 12px; }
 html[data-theme=minimal] .composer textarea, html[data-theme=minimal] .composer textarea:focus { background: transparent; }
@@ -362,9 +363,13 @@ html[data-theme=xp] .modal > header { border-radius: 4px 4px 0 0; padding: 8px 8
 html[data-theme=xp] .modal > header .icon-btn { background: linear-gradient(180deg, #e67a62, #c8401f); color: #fff; border: 1px solid #fff; width: 24px; height: 24px; }
 html[data-theme=xp] .modal > footer { background: var(--xp-window); border-radius: 0; border-top-color: var(--xp-panelbar-line); }
 html[data-theme=xp] .modal-body { background: var(--xp-window); }
-html[data-theme=xp] :is(.dropdown, .ctx-menu, .status-menu, .emoji-panel, .pins-panel, .soundboard) { background: var(--xp-menu); border: 1px solid var(--xp-edge); border-radius: 0; }
+html[data-theme=xp] :is(.dropdown, .ctx-menu, .status-menu, .emoji-panel, .pins-panel, .soundboard, .music-panel) { background: var(--xp-menu); border: 1px solid var(--xp-edge); border-radius: 0; }
 html[data-theme=xp] :is(.dropdown, .ctx-menu, .status-menu) button { border-radius: 0; }
 html[data-theme=xp] :is(.dropdown, .ctx-menu, .status-menu) button:hover:not(:disabled) { background: var(--xp-select); color: #fff; }
+html[data-theme=xp] ::picker(select) { background: var(--xp-menu); border: 1px solid var(--xp-edge); border-radius: 0; padding: 2px; }
+html[data-theme=xp] option { border-radius: 0; padding: 4px 8px; }
+html[data-theme=xp] option::checkmark { color: inherit; }
+html[data-theme=xp] option:is(:hover, :focus-visible) { background: var(--xp-select); color: #fff; }
 html[data-theme=xp] .settings nav { background: var(--xp-settings-nav); border-right: 0; }
 html[data-theme=xp] .settings nav button { color: #fff; border-radius: 0; font-weight: 700; }
 html[data-theme=xp] .settings nav button:hover { background: rgba(255, 255, 255, 0.16); color: #fff; text-decoration: underline; }
@@ -478,12 +483,17 @@ html[data-theme=glass] .composer textarea, html[data-theme=glass] .composer text
 html[data-theme=glass] .switch { background: var(--bg-4); }
 html[data-theme=glass] .switch:checked { background: var(--ok); }
 html[data-theme=glass] .tile { background: var(--glass-soft); }
-html[data-theme=glass] :is(.modal, .dropdown, .ctx-menu, .status-menu, .emoji-panel, .pins-panel, .soundboard, .toast, .call-banner) {
+html[data-theme=glass] :is(.modal, .dropdown, .ctx-menu, .status-menu, .emoji-panel, .pins-panel, .soundboard, .music-panel, .toast, .call-banner) {
   background: var(--glass-menu); -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur); border: 1px solid var(--glass-edge);
 }
 html[data-theme=glass] .modal { border-radius: 22px; }
 html[data-theme=glass] .modal > footer { background: var(--glass-soft); border-radius: 0 0 22px 22px; }
 html[data-theme=glass] :is(.dropdown, .ctx-menu, .status-menu) { border-radius: 14px; }
+html[data-theme=glass] ::picker(select) {
+  background: var(--glass-menu); -webkit-backdrop-filter: var(--glass-blur); backdrop-filter: var(--glass-blur);
+  border: 1px solid var(--glass-edge); border-radius: 14px;
+}
+html[data-theme=glass] option { border-radius: 8px; }
 html[data-theme=glass] :is(.dropdown, .ctx-menu, .status-menu) button { border-radius: 8px; }
 html[data-theme=glass] .toast { color: var(--text-0); border-radius: 14px; }
 html[data-theme=glass] .msg-tools { background: var(--glass-menu); border-radius: 10px; }

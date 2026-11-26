@@ -12,7 +12,8 @@ directly between your computers, encrypted end to end.
 |---|---|---|
 | Text channels, replies, edits, reactions, @mentions, markdown | ✅ | ✅ |
 | Threads (side panel, "also send to channel", follow + unread) | ✅ | ✅ |
-| Apps a group adds when it wants them: Calendar, Tasks, Games, Focus docs | ✅ | ❌ |
+| Apps a group adds when it wants them: Calendar, Tasks, Games, Focus docs, Music | ✅ | ❌ |
+| Music bot in voice channels: your music files, songs shared in the chat, radio streams | ✅ stereo, 160 kbps | (bots by others) |
 | Shared calendar (RSVP, reminders) and task board per group / private chat | ✅ | ❌ |
 | Folders for channels (nested up to 3 levels, drag and drop) | ✅ | one level (categories) |
 | Chess in any channel or private chat, with or without a clock, or against the computer (3 levels) | ✅ | via Activities |
@@ -33,7 +34,7 @@ directly between your computers, encrypted end to end.
 | Noise suppression | ✅ RNNoise (AI), runs on your PC | ✅ Krisp |
 | Screen share | ✅ up to 4K · 60 fps, GPU-encoded (H.264/HEVC/AV1), zoomable, see who's watching | 720p · 30 fps |
 | Webcam | ✅ | ✅ |
-| Moderation: kick, admins, mute for everyone, move between channels | ✅ | ✅ |
+| Moderation: kick, admins, mute for everyone, move between channels (also by dragging) | ✅ | ✅ |
 | Profile and group pictures | ✅ synced, visible offline | ✅ |
 | Themes | ✅ Standard, Minimal, XP Classic, Glass (animated), OLED, each light or dark, with its own fonts, icons and corners | dark / light |
 | Write together | ✅ focus documents: one Markdown text everyone types in at once, full screen, nothing else on it | ❌ |
@@ -93,10 +94,15 @@ their name.
 Tips:
 - Closing the window keeps the app running in the tray, so friends can sync messages from you.
   Quit from the tray icon. (Settings → Network to turn this off.)
+- Settings → Network → **Start OpenDiscord with Windows** (on a Mac: *Open OpenDiscord when you
+  log in*) starts it when you sign in to your computer, by default in the background with just its
+  tray icon, so friends can reach you without you opening it. Off unless you switch it on.
 - `Ctrl+Shift+F9` mute / `Ctrl+Shift+F10` deafen work globally while you're in a call.
 - **Right-click a person** (member list, call tile, voice channel) for their volume, *Mute for
   me*, and, if you're the group's owner or an admin: *Mute for everyone*, *Move to* another voice
   channel, *Disconnect* and *Kick*. The owner can make people admins there.
+- **Drag people between voice channels**: owners and admins drag someone (in the channel list or
+  their call tile) onto another voice channel to move them there. Drag yourself to switch channels.
 - Screen shares are **opt-in**: you see "Alice is streaming" and click **Watch stream**. Your PC
   only receives (and Alice's only sends) the video while you watch. Hover the stream for
   **Stop watching**, fullscreen, and the stream's own volume/mute (separate from Alice's voice).
@@ -105,8 +111,8 @@ Tips:
 - Hover a message → **Reply in thread**. Thread replies stay out of the channel (tick
   *Also send to #channel* to post one in both). You get notified about threads you started or
   replied in, and when someone @mentions you.
-- **Apps**: a new group is just channels. The owner or an admin adds *Calendar*, *Tasks*, *Games*
-  and *Focus docs* with **Add apps** in the channel list (or group menu → *Apps*); they then show
+- **Apps**: a new group is just channels. The owner or an admin adds *Calendar*, *Tasks*, *Games*,
+  *Focus docs* and *Music* with **Add apps** in the channel list (or group menu → *Apps*); they then show
   at the top of everyone's channel list. Removing an app only hides it: its events, tasks, games
   and documents come back when it's added again. Private chats always have all of them, in the header.
 - **Calendar** and **Tasks**: events have a time, place, details, RSVPs and a desktop reminder;
@@ -130,6 +136,16 @@ Tips:
 - `/poll` (or the poll button in the chat header) makes a **poll**. Results show once you've voted.
 - `/poker` (or the game button in the chat header) opens a **poker table**: friends click *Take a seat*, the host
   clicks *Start dealing*. Buy-in, blinds and the turn timer are set when opening the table.
+- **Music bot** (the *Music* app): in a call, the record button (◎) opens the music panel. Add
+  music files from your PC (or drop them on the panel), paste a link to an audio file or an
+  internet radio stream, click ◎ on an audio file in the chat, or type `/play <link>` in a channel
+  (`/skip` skips). Everyone in the voice channel hears it, in stereo, and the bot shows up under
+  the channel with what's playing. Anyone in the call can pause or skip; a song in the queue can
+  be taken out by whoever added it, or by the owner or an admin. Each person sets the music volume
+  for themselves (in the panel or Settings → Voice & audio). There's no server: a song plays from
+  the computer of whoever added it, so your songs stay in the queue while you're in the call.
+  YouTube, Spotify and similar sites only play their music on their own pages and apps, so links
+  to them can't be played.
 - In a voice channel, the ♪ button opens the **soundboard**. Anyone can add short sounds (up to
   7 seconds, 1 MB); everyone in the channel hears them. Settings → Voice & audio sets the volume
   of sounds and of the little join/leave tones.
@@ -243,6 +259,15 @@ Tips:
   app accepts the creator's moves for both sides of that one game.
 - **Apps** are a `group.settings` field like the invite and Claude settings: the newest value set by
   the owner or an admin wins. Apps from before 0.7 ignore it and keep showing everything.
+- **The music bot** has no player of its own: whoever adds a song plays it. Their app decodes it
+  (Web Audio) and sends it as a fifth audio track of the call (after mic, screen video, screen
+  audio and camera), stereo Opus at up to 160 kbps; apps older than 0.8 negotiate four tracks
+  and simply don't hear it. Each app keeps its part of the queue in its voice state, and every
+  app puts the parts together the same way (oldest first), so they agree on what's next without
+  anyone in charge: when a song ends, the app whose song is next starts it. Pause, skip and remove
+  are requests to the app that added the song, which checks them. A link is checked and fetched
+  only by the app of whoever added it (`odweb://`, which serves nothing but audio, and only for
+  links checked that way); friends' apps never contact the site.
 - **@claude** runs on the asker's PC: their app sends that chat's recent messages and any pictures
   or text files in their message to Anthropic with **their own API key**, shows the answer to
   everyone online while it's being written, and posts it as a signed message marked as Claude's.
@@ -321,7 +346,12 @@ Without relays, a direct connection needs at least one of you to be on a "hole-p
   to connect to both others. If you're stuck behind CGNAT, ask your ISP for a public IPv4 address.
 - IPv6 doesn't help with this part: the P2P network (HyperDHT) connects over IPv4 only. Once you're
   connected, calls do use IPv6 if both of you have it.
-- On the same Wi-Fi it always works (LAN).
+- On the same Wi-Fi it works directly over your home network (LAN), as long as Windows trusts
+  that network. **Windows blocks the connection when the Wi-Fi is set to *Public***: the first
+  time OpenDiscord ran, Windows only let it accept connections on *private* networks. Change it in
+  Settings → Network & internet → Wi-Fi (or Ethernet) → your network → **Network profile type:
+  Private**. Only do that on a network you trust, like your home Wi-Fi. On a Mac, allow
+  OpenDiscord under System Settings → Privacy & Security → **Local Network**.
 - **Calls when the direct route fails:** if you can chat but a call can't find a direct path (some
   firewalls block WebRTC's UDP but not the chat connection), the call automatically runs through
   your existing encrypted chat connection instead. It's still only between your two PCs; the call
@@ -367,6 +397,11 @@ ignore it, the update installs the next time you quit the app. Settings → Upda
 version, lets you check by hand, and turns automatic checks off. On a Mac the button says
 **Download update** and opens the new `.dmg` for your Mac (only apps signed with a paid Apple
 Developer ID can replace themselves there).
+
+On Windows the app also keeps the icon of its taskbar, Start menu and desktop shortcuts up to
+date. Windows keeps its own copy of a pinned app's picture, so after the logo changed in 0.6.2 a
+pinned OpenDiscord went on showing the old one. Since 0.8 the app points its shortcuts at an icon
+file named after the picture and has Windows reload them, a few seconds after it starts.
 
 **For whoever maintains the repo:** releasing is automatic.
 [`.github/workflows/release.yml`](.github/workflows/release.yml) runs on every push to `main`. It

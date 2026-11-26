@@ -6,7 +6,8 @@ export const APPS = [
   { id: 'calendar', icon: 'calendar', name: 'Calendar', desc: 'Plan events together, with RSVPs and reminders.' },
   { id: 'tasks', icon: 'tasks', name: 'Tasks', desc: 'A shared task board with assignees, due dates and checklists.' },
   { id: 'games', icon: 'chess', name: 'Games', desc: 'Chess (also against the computer) and poker, played in your channels.' },
-  { id: 'docs', icon: 'focus', name: 'Focus docs', desc: 'Documents you write together, live, with a distraction-free editor.' }
+  { id: 'docs', icon: 'focus', name: 'Focus docs', desc: 'Documents you write together, live, with a distraction-free editor.' },
+  { id: 'music', icon: 'disc', name: 'Music', desc: 'A music bot for your voice channels: queue songs, music files or a radio stream, and everyone in the call hears them.' }
 ]
 
 export const APP_IDS = APPS.map(a => a.id)
