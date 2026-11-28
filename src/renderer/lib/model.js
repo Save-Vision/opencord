@@ -5,6 +5,7 @@ import { cleanGameInfo, deriveChess } from './games.js'
 import { derivePoker } from './poker.js'
 import { TextDoc } from './textcrdt.js'
 import { cleanApps } from './apps.js'
+import { CALL_ID, newCall, callStatus } from './calls.js'
 
 const MAX_TEXT = 4000
 const later = (t1, a1, t2, a2) => t1 > t2 || (t1 === t2 && a1 > a2)
@@ -193,6 +194,7 @@ function newGroup ({ id, nameHint, joinedAt, dm, membership }) {
     polls: new Map(), // msg id -> { votes: Map(key -> [{ v, t, s }]), closes: [{ a, t }] }
     sounds: new Map(), // id -> soundboard clip
     docs: new Map(), // id -> focus document (views/focus.js)
+    calls: new Map(), // id -> a private call: who called, answered, declined, when it ended (lib/calls.js)
     restoring: false, // restored from a backup and still catching up (see main/store.js)
     claudeDrafts: new Map(), // msg id -> an answer Claude is still writing (live, not stored)
     owner: null,
@@ -588,6 +590,25 @@ export class Model {
         })
         gm.last = Math.max(gm.last || 0, op.t)
         gm.v++
+        break
+      }
+      case 'call.start':
+      case 'call.join':
+      case 'call.decline':
+      case 'call.end': {
+        if (!g.dm || typeof d.id !== 'string' || !CALL_ID.test(d.id)) break
+        let c = g.calls.get(d.id)
+        if (!c) { c = newCall(d.id); g.calls.set(d.id, c) }
+        const k = op.k.slice(5)
+        if (k === 'start') {
+          if (!c.by || op.t < c.t) { c.by = op.a; c.t = op.t }
+          if (op.t > g.lastMsgTs) g.lastMsgTs = op.t
+        } else if (k === 'join') {
+          if (!c.joins.has(op.a) || op.t < c.joins.get(op.a)) c.joins.set(op.a, op.t)
+        } else if (k === 'decline') {
+          if (!c.declined.has(op.a)) c.declined.set(op.a, op.t)
+        } else if (op.t > c.end) c.end = op.t
+        g.callsV = (g.callsV || 0) + 1
         break
       }
       case 'game.join':
@@ -1335,10 +1356,32 @@ export class Model {
     this.emit()
   }
 
+  // ---- private calls (lib/calls.js) ----
+
+  // The calls of a private chat, oldest first (only those whose start we know)
+  callsOf (g) {
+    if (!g?.dm || !g.calls.size) return []
+    return [...g.calls.values()].filter(c => c.by).sort((a, b) => a.t - b.t || (a.id < b.id ? -1 : 1))
+  }
+
+  // Someone is in this call right now (my own app tells the model through the voice states it
+  // keeps for friends; for myself, ask voice.js)
+  callLive (g, c, mine = false) {
+    if (mine) return true
+    for (const st of g.voice.values()) if (st.call === c.id && st.ch === DM_CALL) return true
+    return false
+  }
+
+  callStatusOf (g, c, mine = false) {
+    return callStatus(c, this.me.key, this.callLive(g, c, mine))
+  }
+
   markRead (gid, chId) {
     const g = this.groups.get(gid)
     const list = g?.messages.get(chId)
-    const last = list && list.length ? list[list.length - 1].t : 0
+    let last = list && list.length ? list[list.length - 1].t : 0
+    // a call in a private chat counts as read along with its messages
+    if (g?.dm && chId === DM_TEXT) for (const c of g.calls.values()) if (c.by && c.t > last) last = c.t
     const k = gid + ':' + chId
     if ((this.lastRead[k] || 0) >= last) return
     this.lastRead[k] = last
@@ -1356,6 +1399,13 @@ export class Model {
       if (list[i].a === this.me.key && !list[i].bot) continue
       count++
       if (this.mentionsMe(list[i].text) || list[i].ping === this.me.key) mentions++
+    }
+    // calls you missed while away count like a message to you
+    if (g.dm && chId === DM_TEXT) {
+      for (const c of g.calls.values()) {
+        if (!c.by || c.by === this.me.key || c.t <= since) continue
+        if (this.callStatusOf(g, c) === 'missed') { count++; mentions++ }
+      }
     }
     for (const [id, replies] of g.threads) {
       if (!replies.length || replies[0].ch !== chId) continue

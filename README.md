@@ -27,7 +27,7 @@ directly between your computers, encrypted end to end.
 | One-time invite links, "only admins can invite" | ✅ | ✅ |
 | Emoji picker, `:shortcodes:`, pinned messages, link previews | ✅ | ✅ |
 | Right-click to cut, copy and paste, with spelling suggestions | ✅ | ✅ |
-| Friends, private chats and private calls | ✅ | ✅ |
+| Friends, private chats and private calls, with call history (missed calls too) | ✅ | ✅ |
 | File sharing | ✅ any size, sent directly | 10 MB limit |
 | Code and markdown files | ✅ previewed with syntax highlighting | ✅ |
 | Voice channels | ✅ Opus up to 192 kbps | 64–96 kbps |
@@ -107,6 +107,16 @@ Tips:
   only receives (and Alice's only sends) the video while you watch. Hover the stream for
   **Stop watching**, fullscreen, and the stream's own volume/mute (separate from Alice's voice).
   Whoever shares sees who is watching, on the tile and under *Voice connected*.
+- **Sharing Netflix shows black?** Netflix, Disney+, Prime Video and most streaming sites protect
+  their films, so Windows and the browser leave the picture out of every screen share (Discord's
+  too). OpenDiscord notices when your share stays black and tells you what usually helps: in
+  Chrome, open `chrome://settings/system` (Edge: `edge://settings/system`), turn off *Use
+  graphics acceleration when available*, relaunch the browser and start the film again. The site
+  may then send a lower quality. Firefox usually works as it is; the Netflix app for Windows
+  can't be shared at all.
+- **Private chats keep a call history**: who called, how long it lasted, calls they declined, and
+  **missed calls** (also ones that came while your app was closed), which count as unread until
+  you look. *Call back* on a missed call rings them right away.
 - Scroll on a stream to **zoom** in (up to 8×) and drag to pan. Double-click (or ⤢) for fullscreen.
 - Hover a message → **Reply in thread**. Thread replies stay out of the channel (tick
   *Also send to #channel* to post one in both). You get notified about threads you started or
@@ -170,8 +180,11 @@ Tips:
   - **Live** (the default) shows the formatted result next to what you type, and marks the part
     you're writing in; *Preview* shows only the result, *Write* only the text (`Ctrl+E` switches).
     Click a part of the preview to jump there; click a checkbox to tick it.
+  - **Sub-points**: in a list, `Tab` moves an item in under the one above and `Shift+Tab` moves
+    it back out (Enter on an empty sub-point does that too). Outside a list, `Tab` indents the
+    text. The two arrow buttons on the left do the same.
   - **Never used Markdown?** The buttons on the left format the selected words: heading, bold,
-    italic, strikethrough, lists, checklist, quote, code, link, table, divider (pressing one again
+    italic, underline, strikethrough, lists, checklist, indent, quote, code, link, table, divider (pressing one again
     undoes it, and `Ctrl+Z` works too). The **?** button opens a guide that shows, for each one,
     what you type and what you get. Lists carry on by themselves when you press Enter.
 - The window is made of **floating panels** (groups, channels, chat, side panel). Drag the small
@@ -268,6 +281,11 @@ Tips:
   are requests to the app that added the song, which checks them. A link is checked and fetched
   only by the app of whoever added it (`odweb://`, which serves nothing but audio, and only for
   links checked that way); friends' apps never contact the site.
+- **Call history** is part of a private chat's signed history: `call.start` from the caller's
+  app, `call.join` when the friend answers, `call.decline`, and `call.end` from whoever leaves
+  last. The call's id rides along in the voice state, so the answering app knows which call it
+  joined. A missed call is one nobody answered; it reaches you with the rest of the chat when
+  you're back online. Apps older than 0.8.1 skip these entries.
 - **@claude** runs on the asker's PC: their app sends that chat's recent messages and any pictures
   or text files in their message to Anthropic with **their own API key**, shows the answer to
   everyone online while it's being written, and posts it as a signed message marked as Claude's.

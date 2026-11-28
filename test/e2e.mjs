@@ -16,6 +16,9 @@
 // Since 0.8: dropdowns drawn in the theme's colours, starting with the computer (a stand-in: tests
 // never touch the system), the music bot (a music file, then a link through the app's own
 // fetcher, skip, pause) and dragging someone into another voice channel.
+// Since 0.8.1: underlined words and sub-points (Tab / Shift+Tab) in focus docs, a screen share
+// that stays black (as with Netflix) explains itself, and private chats show their call history
+// (answered, declined, missed, call back).
 // Screenshots land in test/screenshots/.
 // Run: npm run test:e2e
 import { _electron as electron } from 'playwright-core'
@@ -525,6 +528,24 @@ try {
   await bob.locator('.focus-preview li.task', { hasText: 'tent' }).click()
   await alice.waitForFunction(() => document.querySelector('.focus-text').value.includes('- [x] tent'), null, { timeout: 10000 })
   await alice.locator('.focus-preview li.task input:checked').waitFor({ timeout: 5000 })
+  // sub-points: Tab moves an item in under the one above, Shift+Tab back out
+  await alice.locator('.focus-text').focus()
+  await alice.keyboard.press(KEY.docEnd)
+  await alice.keyboard.press('Enter')
+  await alice.keyboard.press('Tab')
+  await alice.keyboard.type('chips\nnuts\n')
+  await alice.keyboard.press('Tab')
+  await alice.keyboard.type('salted\n')
+  await alice.keyboard.press('Shift+Tab')
+  await alice.keyboard.press('Shift+Tab')
+  await alice.keyboard.type('games')
+  await alice.waitForFunction(() => document.querySelector('.focus-text').value.endsWith('- [ ] snacks\n  - [ ] chips\n  - [ ] nuts\n    - [ ] salted\n- [ ] games'), null, { timeout: 5000 })
+    .catch(async () => { throw new Error('sub-points came out wrong: ' + JSON.stringify(await docText(alice))) })
+  await bob.locator('.focus-preview li.task li.task li.task', { hasText: 'salted' }).waitFor({ timeout: 10000 })
+  // underline: select a word, press the button
+  await alice.locator('.focus-text').evaluate((el) => { const i = el.value.indexOf('the tent'); el.focus(); el.setSelectionRange(i + 4, i + 8) })
+  await alice.locator('.ft-btn[data-tool="underline"]').click()
+  await bob.locator('.focus-preview u', { hasText: 'tent' }).waitFor({ timeout: 10000 })
   await alice.mouse.move(400, 300)
   await settle(alice)
   await shot(alice, '56-focus-alice')
@@ -1021,6 +1042,37 @@ try {
     console.log('   capture:', JSON.stringify(await alice.evaluate(() => { const s = window.__od.voice.local.screen.getVideoTracks()[0].getSettings(); return { w: s.width, h: s.height, fps: s.frameRate } })))
     await shot(bob, '04-screenshare')
     await shot(alice, '05-sharing')
+    // a share that stays black, like a Netflix film: alice learns why and what helps, bob sees why
+    await alice.evaluate(() => {
+      const c = document.createElement('canvas')
+      c.width = 320
+      c.height = 180
+      const x = c.getContext('2d')
+      x.fillStyle = '#000'
+      x.fillRect(0, 0, 320, 180)
+      x.fillStyle = '#d9dde3' // the browser's tab bar above the blacked-out film
+      x.fillRect(0, 0, 320, 22)
+      window.__blackTrack = c.captureStream(5).getVideoTracks()[0]
+      const w = window.__od.voice.blackWatch
+      w.every = 250
+      w.start(window.__blackTrack)
+    })
+    await alice.locator('.banner.share-black').waitFor({ timeout: 10000 })
+    await alice.locator('.vp-note.warn').waitFor({ timeout: 5000 })
+    await bob.locator('.tile.screen .tile-black-note').waitFor({ timeout: 10000 })
+    await shot(bob, '04b-black-share-viewer')
+    await alice.locator('.banner.share-black button', { hasText: 'What helps' }).click()
+    await alice.locator('.modal', { hasText: 'chrome://settings/system' }).waitFor({ timeout: 5000 })
+    await settle(alice)
+    await shot(alice, '05b-black-share-help')
+    await alice.getByRole('button', { name: 'Got it' }).click()
+    // the real picture again: the notes go away
+    await alice.evaluate(() => { const v = window.__od.voice; v.blackWatch.start(v.local.screen.getVideoTracks()[0]); window.__blackTrack.stop() })
+    await bob.locator('.tile.screen .tile-black-note').waitFor({ state: 'detached', timeout: 10000 })
+    await alice.locator('.banner.share-black').waitFor({ state: 'detached', timeout: 5000 })
+    await alice.waitForTimeout(2000) // the fake capture isn't black: the watch stays quiet
+    if (await alice.locator('.banner.share-black').count()) throw new Error('a normal share was taken for a black one')
+    console.log('   a black share was noticed and explained, on both sides')
 
     step('zoom into the screen share')
     const zbox = await bob.locator('.tile.screen .zoom-wrap').first().boundingBox()
@@ -1170,6 +1222,43 @@ try {
   await alice.waitForTimeout(2000)
   if (await alice.locator('.call-banner').count() || await bob.locator('.call-banner').count()) throw new Error('a call rang right after hanging up')
   console.log('   hanging up ended the call for both, nothing rang afterwards')
+
+  step('call history in the private chat: answered, declined, missed, call back')
+  await alice.locator('.dm-item', { hasText: 'Bob' }).click()
+  await alice.locator('.call-row.done', { hasText: 'You started a call that lasted' }).waitFor({ timeout: 10000 })
+  await bob.locator('.dm-item', { hasText: 'Alice' }).click()
+  await bob.locator('.call-row.done', { hasText: 'Alice started a call that lasted' }).waitFor({ timeout: 10000 })
+  // Bob declines: Alice is told, and both chats say so
+  await alice.locator('.chat-header button[title="Start a call"]').click()
+  await bob.locator('.call-banner').waitFor({ timeout: 10000 })
+  await bob.locator('.call-row.ringing', { hasText: 'Alice is calling you' }).waitFor({ timeout: 10000 })
+  await bob.locator('.call-banner .round-btn[title="Decline"]').click()
+  await alice.locator('.toast', { hasText: 'Bob declined the call' }).waitFor({ timeout: 10000 })
+  await alice.locator('.call-controls .hangup').click()
+  await bob.locator('.call-row.declined', { hasText: 'You declined a call from Alice' }).waitFor({ timeout: 10000 })
+  await alice.locator('.dm-item', { hasText: 'Bob' }).click()
+  await alice.locator('.call-row.declined', { hasText: 'Bob declined your call' }).waitFor({ timeout: 10000 })
+  // a call Bob doesn't answer while he's elsewhere: missed, and unread until he looks
+  await bob.locator('.channels .channel.nav', { hasText: 'Friends' }).click()
+  await alice.locator('.chat-header button[title="Start a call"]').click()
+  await bob.locator('.call-banner').waitFor({ timeout: 10000 })
+  await alice.waitForTimeout(1500)
+  await alice.locator('.call-controls .hangup').click()
+  await bob.locator('.call-banner').waitFor({ state: 'detached', timeout: 10000 })
+  await bob.locator('.dm-item', { hasText: 'Alice' }).locator('.badge').waitFor({ timeout: 10000 })
+  await bob.locator('.dm-item', { hasText: 'Alice' }).click()
+  await bob.locator('.call-row.missed.bad', { hasText: 'Missed call from Alice' }).waitFor({ timeout: 10000 })
+  await alice.locator('.dm-item', { hasText: 'Bob' }).click()
+  await alice.locator('.call-row.missed', { hasText: "Bob didn't answer your call" }).waitFor({ timeout: 10000 })
+  await settle(bob)
+  await shot(bob, '25-call-history')
+  if (await bob.locator('.dm-item', { hasText: 'Alice' }).locator('.badge').count()) throw new Error('the missed call stayed unread after Bob looked')
+  // one click calls back
+  await bob.locator('.call-row.missed button', { hasText: 'Call back' }).last().click()
+  await alice.locator('.call-banner').waitFor({ timeout: 10000 })
+  await bob.locator('.call-controls .hangup').click()
+  await alice.locator('.call-banner').waitFor({ state: 'detached', timeout: 10000 })
+  console.log('   call history:', (await alice.locator('.call-row .call-text').allTextContents()).join(' | '))
 
   step('kick')
   await alice.locator('.rail-btn[title="Squad"]').click()

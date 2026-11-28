@@ -14,6 +14,10 @@
 
 import { getMic, stopMic, isDenoised } from './denoise.js'
 import { playTone, configureSounds } from './sounds.js'
+import { BlackWatch } from './sharecheck.js'
+
+// A private chat's call channel (model.js DM_CALL; not imported, so voice.js stays loadable alone)
+const DM_CALL = 'call'
 
 const SLOTS = [
   { name: 'mic', kind: 'audio' },
@@ -114,10 +118,20 @@ export class Voice {
     this.api = api
     this.model = model
     configureSounds(() => model.settings)
-    this.active = null // { gid, ch, sid }
+    this.active = null // { gid, ch, sid, call }: call = the private call's id (lib/calls.js)
     this.calls = new Map()
     this.local = { mic: null, screen: null, cam: null }
     this.screenOpts = null
+    // what I share stays black (a protected film, see sharecheck.js): tell me what helps
+    this.screenBlack = false
+    this.blackSeen = false // I've been told about it during this share
+    this.blackWatch = new BlackWatch((black) => {
+      this.screenBlack = black
+      this._broadcastState()
+      if (black && !this.blackSeen) this.onScreenBlack?.()
+      this.model.emit()
+    })
+    this.onCallLog = null // (gid, 'start' | 'join' | 'end', id): writes call history (core.js)
     this.watching = new Set() // keys of sharers whose stream I watch
     this.sharing = new Set() // keys of people in my channel who share their screen (for the start/stop sounds)
     this.muted = false
@@ -151,6 +165,18 @@ export class Voice {
     if (this.active) this.leave(true)
     const sid = rid()
     this.active = { gid, ch, sid }
+    // a private call: answer the friend's call if they're in it, otherwise start a new one
+    const dm = this.model.groups.get(gid)
+    if (dm?.dm && ch === DM_CALL) {
+      const theirs = dm.voice.get(dm.dm)
+      if (theirs?.ch !== DM_CALL) {
+        this.active.call = rid()
+        this.onCallLog?.(gid, 'start', this.active.call)
+      } else if (typeof theirs.call === 'string' && theirs.call) {
+        this.active.call = theirs.call
+        this.onCallLog?.(gid, 'join', this.active.call)
+      } // (a friend's app before 0.8.1 sends no call id: that call isn't written down)
+    }
     this.micError = null
     this.model.emit()
     let mic = null
@@ -186,6 +212,9 @@ export class Voice {
     const dm = this.model.groups.get(gid)
     const theirs = dm?.dm && dm.voice.get(dm.dm)
     if (theirs?.sid) (this.model.ui.dismissedCalls ||= new Set()).add(gid + ':' + theirs.sid)
+    // the last one to leave a private call writes down that it ended
+    if (this.active.call && theirs?.ch !== DM_CALL) this.onCallLog?.(gid, 'end', this.active.call)
+    this.blackWatch.stop()
     this.sharing.clear()
     for (const call of [...this.calls.values()]) this._closeCall(call)
     stopMic(this.local.mic)
@@ -214,12 +243,14 @@ export class Voice {
       type: 'voice',
       ch: this.active.ch,
       sid: this.active.sid,
+      call: this.active.call || undefined,
       muted: this.muted || !this.local.mic || this.serverMuted,
       smute: this.serverMuted,
       deaf: this.deafened,
       screen: !!this.local.screen,
       screenLabel: this.screenOpts ? SCREEN_PRESETS[this.screenOpts.preset]?.label : null,
       screenAudio: !!this.local.screen?.getAudioTracks().length,
+      black: (!!this.local.screen && this.screenBlack) || undefined,
       watch: [...this.watching],
       cam: !!this.local.cam,
       music: this.music?.payload()
@@ -717,7 +748,7 @@ export class Voice {
     this.model.emit()
   }
 
-  async startScreen ({ sourceId, preset, audio, contentHint }) {
+  async startScreen ({ sourceId, sourceName, preset, audio, contentHint }) {
     if (!this.active) throw new Error('Join a voice channel first')
     const p = SCREEN_PRESETS[preset] || SCREEN_PRESETS['1080p60']
     const wantAudio = !!audio && this.model.platform === 'win32'
@@ -734,7 +765,10 @@ export class Voice {
     this.local.screen?.getTracks().forEach(t => t.stop())
     this.local.screen = stream
     const fresh = !this.screenOpts
-    this.screenOpts = { preset, contentHint, audio: wantAudio }
+    this.screenOpts = { preset, contentHint, audio: wantAudio, name: sourceName || '' }
+    this.blackSeen = false
+    this.blackHidden = false
+    this.blackWatch.start(vt)
     for (const call of this.calls.values()) { this._attachLocalTracks(call); this._applyAllSenderParams(call) }
     if (fresh) playTone('stream')
     this._broadcastState()
@@ -743,6 +777,7 @@ export class Voice {
 
   stopScreen () {
     if (!this.local.screen) return
+    this.blackWatch.stop()
     this.local.screen.getTracks().forEach(t => t.stop())
     this.local.screen = null
     this.screenOpts = null

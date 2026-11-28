@@ -5,7 +5,8 @@ import {
 } from '../lib/core.js'
 import { renderMarkdown, renderMarkdownDoc, isEmojiOnly, previewableUrls } from '../lib/markdown.js'
 import { highlight, extOf, langFor, langLabel } from '../lib/highlight.js'
-import { DM_CALL } from '../lib/model.js'
+import { DM_CALL, DM_TEXT } from '../lib/model.js'
+import { callLength, fmtCallLength } from '../lib/calls.js'
 import { Icon } from '../lib/icons.js'
 import { askClaude, mentionsClaude, claudeBlocked, stopClaude, MODEL_LABEL, isClaudeAnswer } from '../lib/claude.js'
 import { EmojiPanel, EmojiSuggest, loadEmoji, searchEmoji, rememberEmoji } from './emoji.js'
@@ -317,14 +318,25 @@ function MessageList ({ g, ch }) {
   const ctx = { names, myName: (model.me.name || '').toLowerCase(), openLink: (u) => openLink(u) }
   const drafts = model.claudeDraftsIn(g, ch.id)
 
+  // a private chat's calls sit between its messages (lib/calls.js)
+  const calls = g.dm && ch.id === DM_TEXT ? model.callsOf(g) : []
+  const from = shown.length < list.length ? shown[0]?.t ?? Infinity : -Infinity
+  const items = calls.length ? mergeCalls(shown, calls.filter(c => c.t >= from)) : shown
+
   const rows = []
   let prev = shown.length < list.length ? null : undefined
   let shownNew = false
-  for (const m of shown) {
+  for (const m of items) {
     if (!prev || fmtDay(prev.t) !== fmtDay(m.t)) rows.push(html`<div class="day-divider" key=${'d' + m.id}><span>${fmtDay(m.t)}</span></div>`)
-    if (!shownNew && m.t > unreadAfter && m.a !== model.me.key) {
+    const fromOther = m.call ? m.call.by !== model.me.key : m.a !== model.me.key
+    if (!shownNew && m.t > unreadAfter && fromOther) {
       shownNew = true
       rows.push(html`<div class="new-divider" key="new"><span>NEW</span></div>`)
+    }
+    if (m.call) {
+      rows.push(html`<${CallRow} key=${m.id} g=${g} c=${m.call} />`)
+      prev = m
+      continue
     }
     const grouped = groupable(prev, m) && fmtDay(prev.t) === fmtDay(m.t) && !m.re && !m.also && !m.deleted && !prev.deleted && !model.threadInfo(g, prev.id)
     rows.push(html`<${Message} key=${m.id} g=${g} m=${m} grouped=${grouped} ctx=${ctx} onMediaLoad=${onMediaLoad} />`)
@@ -352,6 +364,49 @@ function MessageList ({ g, ch }) {
       <div class="messages-end" />
     </div></div>
     ${!atBottom && html`<button class="jump" onClick=${() => { stick.current = true; ref.current.scrollTop = ref.current.scrollHeight }}>Jump to present ↓</button>`}`
+}
+
+// Messages and calls in time order. A call becomes a row of its own ({ id, t, call }), which
+// never groups with the messages around it.
+function mergeCalls (msgs, calls) {
+  const out = []
+  let j = 0
+  for (const m of msgs) {
+    while (j < calls.length && calls[j].t < m.t) { out.push({ id: 'call-' + calls[j].id, t: calls[j].t, call: calls[j] }); j++ }
+    out.push(m)
+  }
+  for (; j < calls.length; j++) out.push({ id: 'call-' + calls[j].id, t: calls[j].t, call: calls[j] })
+  return out
+}
+
+// One call in a private chat: who called, and whether it was answered, missed or declined
+function CallRow ({ g, c }) {
+  const me = model.me.key
+  const mine = voice.active?.call === c.id
+  const status = model.callStatusOf(g, c, mine)
+  const friend = model.groupName(g)
+  const caller = c.by === me ? 'You' : model.memberName(g, c.by)
+  const len = callLength(c)
+  const text = {
+    ringing: `${caller} is calling you`,
+    calling: `You're calling ${friend}…`,
+    ongoing: `${caller} started a call · going on now`,
+    done: `${caller} started a call${len ? ' that lasted ' + fmtCallLength(len) : ''}`,
+    declined: c.by === me ? `${friend} declined your call` : `You declined a call from ${caller}`,
+    missed: c.by === me ? `${friend} didn't answer your call` : `Missed call from ${caller}`
+  }[status]
+  const bad = status === 'missed' && c.by !== me
+  const icon = bad || status === 'declined' ? 'phoneMissed' : c.by === me ? 'phone' : 'phoneIn'
+  const join = (status === 'ringing' || status === 'ongoing') && !mine
+  const back = (status === 'missed' || status === 'declined') && c.by !== me && !voice.inChannel(g.id, DM_CALL)
+  return html`
+    <div id=${'call-' + c.id} class="call-row ${status} ${bad ? 'bad' : ''}">
+      <span class="call-icon"><${Icon} name=${icon} size=${16} /></span>
+      <span class="call-text">${text}</span>
+      <time title=${new Date(c.t).toLocaleString()}>${fmtStamp(c.t)}</time>
+      ${join && html`<button class="btn sm good" onClick=${() => startDmCall(g)}><${Icon} name="phone" size=${14} /> Join</button>`}
+      ${back && html`<button class="btn sm" onClick=${() => startDmCall(g)}><${Icon} name="phone" size=${14} /> Call back</button>`}
+    </div>`
 }
 
 // An answer Claude is still writing, streamed live from the asker's app

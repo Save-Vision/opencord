@@ -207,6 +207,7 @@ export function VoiceStage ({ g, ch }) {
               : me
                 ? html`<${Video} stream=${stream} onDblClick=${fullscreen} />`
                 : html`${stream && html`<${ZoomableScreen} stream=${stream} onDblClick=${fullscreen} />`}${!live && html`<div class="tile-wait">Connecting to stream…</div>`}`}
+            ${watching && !me && st.black && html`<div class="tile-black-note"><${Icon} name="alert" size=${14} /> Looks black? Streaming sites like Netflix block their picture in screen shares. ${name}'s app shows what helps.</div>`}
             ${watching && html`<div class="tile-label"><span class="live">LIVE</span> ${me ? 'Your screen' : name + "'s screen"}</div>`}
             ${watching && html`<div class="tile-stats">${me ? sendStatsLabel(st.screenLabel) : s ? `${s.w}×${s.h} · ${s.fps} fps · ${fmtRate(s.kbps)}${s.codec ? ' · ' + s.codec : ''}` : ''}</div>`}
             ${watching && html`<${Viewers} g=${g} keys=${viewers} me=${me} />`}
@@ -261,6 +262,13 @@ export function VoiceStage ({ g, ch }) {
         <span class="header-note"><${Icon} name="shield" size=${13} /> Peer-to-peer · end-to-end encrypted</span>
       </header>
       ${failed && html`<div class="banner bad">A direct connection to someone could not be established. Both of you may be behind strict NAT/CGNAT — see README → "If a call won't connect".</div>`}
+      ${voice.local.screen && voice.screenBlack && !voice.blackHidden && html`
+        <div class="banner warn share-black">
+          <${Icon} name="alert" size=${16} />
+          <span>What you share looks black. Netflix and other streaming sites block their picture in screen shares.</span>
+          <button class="btn sm" onClick=${() => model.openModal('screenBlack')}>What helps</button>
+          <button class="icon-btn small" title="Hide" onClick=${() => { voice.blackHidden = true; model.emit() }}><${Icon} name="x" size=${14} /></button>
+        </div>`}
       <div class="tiles ${focused ? 'has-focus' : ''} n${Math.min(tiles.length, 9)}">
         ${focused
           ? html`<div class="focus-area">${focused.el}</div><div class="strip">${tiles.filter(t => t !== focused).map(t => html`<div key=${t.id}>${t.el}</div>`)}</div>`

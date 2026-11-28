@@ -336,6 +336,12 @@ export function FocusEditor ({ g, doc }) {
   const onKeyDown = (e) => {
     const id = toolForKey(e)
     if (id) { e.preventDefault(); apply(TOOLS.find(t => t.id === id)); return }
+    // Tab / Shift+Tab indent and outdent, like in a word processor (Esc still leaves the editor)
+    if (e.key === 'Tab' && !e.ctrlKey && !e.metaKey && !e.altKey && !composing.current) {
+      e.preventDefault()
+      apply(TOOLS.find(t => t.id === (e.shiftKey ? 'outdent' : 'indent')))
+      return
+    }
     if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey && !composing.current) {
       const el = e.currentTarget
       const res = continueList({ text: el.value, start: el.selectionStart, end: el.selectionEnd })

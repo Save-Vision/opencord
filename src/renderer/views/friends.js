@@ -2,7 +2,7 @@
 // from a key exchange between your identities (see main/crypto.js dmSecret). Requests go
 // straight from your app to theirs; nothing stores them in between.
 import { html, useState, useEffect } from '../vendor/preact-htm.js'
-import { api, model, voice, act, fmtStamp } from '../lib/core.js'
+import { api, model, voice, act, append, fmtStamp } from '../lib/core.js'
 import { DM_CALL, DM_TEXT, shortKey } from '../lib/model.js'
 import { playTone } from '../lib/voice.js'
 import { Icon } from '../lib/icons.js'
@@ -240,6 +240,15 @@ export function FriendsPage () {
     </section>`
 }
 
+// Stop ringing, and write down that I declined (their app shows it, see lib/calls.js)
+function declineCall (d) {
+  const st = d.voice.get(d.dm)
+  if (!st) return
+  model.ui.dismissedCalls.add(d.id + ':' + st.sid)
+  model.emit()
+  if (st.call) act(() => append(d.id, 'call.decline', { id: st.call }))
+}
+
 // A friend is in your private call and you aren't: ring until you answer or decline.
 export function CallBanner () {
   const dismissed = model.ui.dismissedCalls || (model.ui.dismissedCalls = new Set())
@@ -262,6 +271,6 @@ export function CallBanner () {
       <${Avatar} name=${name} color=${model.memberColor(d, d.dm)} src=${model.memberAvatar(d, d.dm)} size=${44} speaking />
       <div><b>${name}</b><small>is calling you…</small></div>
       <button class="round-btn good" title="Accept" onClick=${() => startDmCall(d)}><${Icon} name="phone" size=${20} /></button>
-      <button class="round-btn danger" title="Decline" onClick=${() => { dismissed.add(d.id + ':' + d.voice.get(d.dm).sid); model.emit() }}><${Icon} name="x" size=${20} /></button>
+      <button class="round-btn danger" title="Decline" onClick=${() => declineCall(d)}><${Icon} name="x" size=${20} /></button>
     </div>`
 }

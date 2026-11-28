@@ -1109,3 +1109,114 @@ test('music: the Music app is added like the others and starts switched off', ()
   assert.strictEqual(m.appOn(g, 'music'), true)
   assert.deepStrictEqual(m.groupSettings(g).apps, ['calendar', 'music'])
 })
+
+// ---- 0.8.1: underline, sub-points and indenting in focus docs; call history ----
+
+test('formatting: underline (Ctrl+U), and Tab / Shift+Tab make and undo sub-points', () => {
+  const tool = (id) => md.TOOLS.find(t => t.id === id)
+  assert.strictEqual(show(tool('underline').run(sel('a [word] here'))), 'a __[word]__ here')
+  assert.strictEqual(show(tool('underline').run(sel('a __[word]__ here'))), 'a [word] here')
+  assert.strictEqual(md.toolForKey({ ctrlKey: true, key: 'u', code: 'KeyU' }), 'underline')
+  const at = (text, word) => ({ text, start: text.indexOf(word), end: text.indexOf(word) })
+  // Tab: a sub-point of the item above, lined up under its text (2 spaces after "- ", 3 after "1. ")
+  assert.strictEqual(md.indent(at('- a\n- b\n- c', 'b'), 1).text, '- a\n  - b\n- c')
+  assert.strictEqual(md.indent(at('- a\n  - b\n  - c', 'c'), 1).text, '- a\n  - b\n    - c')
+  // numbered sub-points count from 1, and back out they count on
+  assert.strictEqual(md.indent(at('1. a\n2. b\n3. c', 'b'), 1).text, '1. a\n   1. b\n3. c')
+  assert.strictEqual(md.indent(at('1. a\n   1. b\n3. c', 'b'), -1).text, '1. a\n2. b\n3. c')
+  // Shift+Tab: back to the parent's level
+  assert.strictEqual(md.indent(at('- a\n  - b\n    - c', 'c'), -1).text, '- a\n  - b\n  - c')
+  // the caret stays next to the same letter
+  const r = md.indent(at('- a\n- b', 'b'), 1)
+  assert.strictEqual(r.text.slice(r.start), 'b')
+  // several lines move together, keeping their own levels
+  assert.strictEqual(md.indent({ text: '- a\n- b\n  - c', start: 4, end: 13 }, 1).text, '- a\n  - b\n    - c')
+  // plain text moves by 4 spaces; nothing to take back at the left edge
+  assert.strictEqual(md.indent(at('Some text', 'Some'), 1).text, '    Some text')
+  assert.strictEqual(md.indent(at('    Some text', 'Some'), -1).text, 'Some text')
+  assert.strictEqual(md.indent(at('Some text', 'Some'), -1).text, 'Some text')
+  // lines inside a code block are left to the code
+  assert.strictEqual(md.indent({ text: '```\nx\n```', start: 4, end: 4 }, 1).text, '```\nx\n```')
+  // Enter on an empty sub-point moves it back a level; on an empty top-level item, ends the list
+  assert.strictEqual(md.continueList({ text: '- a\n  - ', start: 8, end: 8 }).text, '- a\n- ')
+  assert.strictEqual(md.continueList({ text: '- a\n- ', start: 6, end: 6 }).text, '- a\n')
+  // list buttons keep sub-points where they are
+  const all = (text) => ({ text, start: 0, end: text.length })
+  assert.strictEqual(tool('number').run(all('a\n  b\n  c\nd')).text, '1. a\n  1. b\n  2. c\n2. d')
+  assert.strictEqual(tool('bullet').run(all('- a\n  - b')).text, 'a\n  b')
+  assert.strictEqual(tool('task').run(all('- a\n  - b')).text, '- [ ] a\n  - [ ] b')
+})
+
+// markdown.js loads Preact from the app's vendor folder; here it comes from node_modules
+const { register } = await import('node:module')
+const preactUrl = new URL('../node_modules/htm/preact/standalone.module.js', import.meta.url).href
+register('data:text/javascript,' + encodeURIComponent(
+  'export async function resolve (s, c, next) {' +
+  '  if (s.endsWith("/vendor/preact-htm.js")) return { url: ' + JSON.stringify(preactUrl) + ', shortCircuit: true };' +
+  '  return next(s, c);' +
+  '}'))
+const { renderMarkdownDoc } = await import('../src/renderer/lib/markdown.js')
+const tree = (v) => {
+  if (v == null || typeof v === 'boolean') return ''
+  if (Array.isArray(v)) return v.map(tree).join('')
+  if (typeof v !== 'object') return String(v)
+  const tag = typeof v.type === 'string' ? v.type : ''
+  const indent = v.props?.style?.marginLeft ? `(${v.props.style.marginLeft})` : ''
+  return tag && tag !== 'span' && tag !== 'div' ? `<${tag}${indent}>${tree(v.props.children)}</${tag}>` : tree(v.props?.children)
+}
+const doc = (t) => tree(renderMarkdownDoc(t, { openLink () {} }))
+
+test('focus docs: sub-points show at every depth, indented text is indented, __underline__', () => {
+  // 2 spaces a level, as Tab makes them (this used to put c next to b)
+  assert.strictEqual(doc('- a\n  - b\n    - c\n- d'), '<ul><li>a<ul><li>b<ul><li>c</li></ul></li></ul></li><li>d</li></ul>')
+  assert.strictEqual(doc('- a\n    - b\n        - c'), '<ul><li>a<ul><li>b<ul><li>c</li></ul></li></ul></li></ul>')
+  assert.strictEqual(doc('1. a\n   1. b\n      1. c\n2. d'), '<ol><li>a<ol><li>b<ol><li>c</li></ol></li></ol></li><li>d</li></ol>')
+  assert.strictEqual(doc('- [ ] a\n  - [x] b'), '<ul><li><input></input>a<ul><li><input></input>b</li></ul></li></ul>')
+  assert.strictEqual(doc('text\n\n    more\n\n        most'), '<p>text</p><p(1.75em)>more</p><p(3.5em)>most</p>')
+  assert.strictEqual(doc('    - an indented list'), '<ul(1.75em)><li>an indented list</li></ul>')
+  assert.strictEqual(doc('a __b__ c'), '<p>a <u>b</u> c</p>')
+})
+
+test('private calls: answered, missed and declined, and a missed call counts as unread', async () => {
+  const { callStatus, fmtCallLength } = await import('../src/renderer/lib/calls.js')
+  seq = { [A]: 0, [B]: 0, [C]: 0 }
+  const m = new Model()
+  m.me = { key: A, name: 'me' }
+  m.settings = {}
+  m.addGroup({ id: 'd1', nameHint: 'B', joinedAt: 0, dm: B, membership: { owner: A, admins: [] } })
+  const g = m.groups.get('d1')
+  const id = (n) => String(n).padStart(16, '0')
+  const min = 60000
+  m.applyOps('d1', [
+    // 1: I call, B answers, B hangs up last after 12 minutes
+    raw('call.start', A, { id: id(1) }, 1 * min), raw('call.join', B, { id: id(1) }, 1 * min + 5000), raw('call.end', B, { id: id(1) }, 13 * min),
+    // 2: B calls while I'm away; B gives up
+    raw('call.start', B, { id: id(2) }, 20 * min), raw('call.end', B, { id: id(2) }, 21 * min),
+    // 3: B calls, I decline
+    raw('call.start', B, { id: id(3) }, 30 * min), raw('call.decline', A, { id: id(3) }, 30 * min + 3000), raw('call.end', B, { id: id(3) }, 31 * min),
+    // malformed and stray ops change nothing
+    raw('call.start', B, { id: 'not-an-id' }, 32 * min), raw('call.join', A, { id: id(9) }, 33 * min)
+  ])
+  const calls = m.callsOf(g)
+  assert.deepStrictEqual(calls.map(c => c.id), [id(1), id(2), id(3)]) // id(9) has no start: not shown
+  assert.deepStrictEqual(calls.map(c => m.callStatusOf(g, c)), ['done', 'missed', 'declined'])
+  assert.strictEqual(fmtCallLength(calls[0].end - calls[0].t), '12 minutes')
+  assert.strictEqual(fmtCallLength(20000), 'less than a minute')
+  assert.strictEqual(fmtCallLength(95 * min), 'an hour 35 min')
+  // seen from B, the call B gave up on is missed too
+  assert.strictEqual(callStatus(calls[1], B, false), 'missed')
+  // while someone is in it, a call is ringing / going on
+  g.voice.set(B, { ch: 'call', call: id(2) })
+  assert.strictEqual(m.callStatusOf(g, calls[1]), 'ringing')
+  g.voice.delete(B)
+  // the missed call is unread (and counts like a mention), until the chat is read
+  assert.deepStrictEqual(m.unread(g, 'dm'), { count: 1, mentions: 1 })
+  m.markRead('d1', 'dm')
+  assert.deepStrictEqual(m.unread(g, 'dm'), { count: 0, mentions: 0 })
+  // calls bring the private chat to the top of the list
+  assert.strictEqual(g.lastMsgTs, 30 * min)
+  // only private chats have calls
+  const n = makeModel()
+  n.applyOps('g1', [raw('call.start', B, { id: id(4) }, 5)])
+  assert.strictEqual(n.groups.get('g1').calls.size, 0)
+})

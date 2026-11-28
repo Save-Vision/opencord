@@ -37,6 +37,23 @@ export async function append (gid, kind, data) {
   return op
 }
 
+// Private calls write their history into the chat (lib/calls.js)
+voice.onCallLog = (gid, kind, id) => {
+  append(gid, 'call.' + kind, { id }).catch((err) => console.warn('[calls]', err.message))
+}
+
+// What you share stays black (a film from Netflix & co., see sharecheck.js): say what helps,
+// once per share. You're probably looking at the film, not at OpenDiscord.
+voice.onScreenBlack = () => {
+  voice.blackSeen = true
+  model.toast('Your screen share looks black. Streaming sites like Netflix block their picture; open the call to see what helps.', 'error')
+  if (model.ui.focused || !model.settings.notifications) return
+  try {
+    const n = new Notification('Your screen share looks black', { body: 'Netflix and other streaming sites block their picture in screen shares. Click to see what helps.' })
+    n.onclick = () => { api.showWindow(); model.openModal('screenBlack') }
+  } catch {}
+}
+
 export async function saveSettings (patch) {
   model.settings = await api.setSettings(patch)
   model.emit()
@@ -153,10 +170,30 @@ export async function importFiles ({ paths, files }) {
 
 // ---- notifications ----
 
+const missedNotified = new Set()
+
+// A friend declined my call, or I missed theirs
+function callNews (g, op) {
+  const c = g.calls.get(op.d?.id)
+  if (!c?.by) return
+  const name = model.memberName(g, op.a)
+  if (op.k === 'call.decline' && voice.active?.call === c.id) model.toast(`${name} declined the call`)
+  if (op.k !== 'call.end' || c.by === model.me.key || missedNotified.has(c.id)) return
+  if (model.callStatusOf(g, c, voice.active?.call === c.id) !== 'missed') return
+  missedNotified.add(c.id)
+  api.attention()
+  if (!model.settings.notifications) return
+  try {
+    const n = new Notification(`Missed call from ${model.memberName(g, c.by)}`, { body: 'Open the chat to call back', icon: model.memberAvatar(g, c.by) || undefined })
+    n.onclick = () => { api.showWindow(); model.ui.stage = null; model.selectGroup(g.id) }
+  } catch {}
+}
+
 export function handleNewOps (gid, ops) {
   const g = model.groups.get(gid)
   if (!g) return
   for (const op of ops) {
+    if (op.a !== model.me.key && g.dm && op.k.startsWith('call.') && Date.now() - op.t < 2 * 60 * 1000) callNews(g, op)
     if (op.k !== 'msg' || op.a === model.me.key) continue
     if (Date.now() - op.t > 2 * 60 * 1000) continue // history arriving via sync — don't spam
     const ch = g.channels.get(op.d.ch)

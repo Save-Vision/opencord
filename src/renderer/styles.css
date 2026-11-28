@@ -686,6 +686,8 @@ pre.codeblock code { font: inherit; }
 .md-doc li { margin: 2px 0; }
 .md-doc li > ul, .md-doc li > ol { margin: 2px 0; }
 .md-doc li.task { list-style: none; margin-left: -22px; }
+/* a checklist inside a list item: its boxes sit under the item's text, one level in */
+.md-doc li > ul > li.task, .md-doc li > ol > li.task { margin-left: -4px; }
 .md-doc li.task input { width: auto; margin: 0 6px 0 0; vertical-align: -2px; accent-color: var(--accent); }
 .md-doc hr { border: 0; border-top: 1px solid var(--border); margin: 16px 0; }
 .md-doc blockquote { color: var(--text-2); margin: 0 0 10px; }
@@ -1529,3 +1531,26 @@ html[data-theme=minimal] .ft-sep { background: var(--bg-4); }
 .eq i:nth-child(3) { animation-delay: -0.6s; }
 @keyframes eq { 0%, 100% { height: 3px; } 50% { height: 12px; } }
 @media (prefers-reduced-motion: reduce) { .icon.spin, .eq i { animation: none; } }
+
+/* ---------------------------------------------------------------- call history (private chats) */
+.call-row { display: flex; align-items: center; gap: 10px; margin: 6px 16px; padding: 6px 12px 6px 10px; border-radius: 10px; font-size: 13.5px; color: var(--text-1); }
+.call-row .call-icon { width: 28px; height: 28px; flex: none; border-radius: 50%; display: grid; place-items: center; background: var(--bg-3); color: var(--ok); }
+.call-row.bad .call-icon, .call-row.declined .call-icon { color: var(--danger); }
+.call-row.bad .call-text { color: var(--danger); font-weight: 600; }
+.call-row.ringing .call-icon, .call-row.calling .call-icon, .call-row.ongoing .call-icon { background: var(--ok); color: #fff; }
+.call-row time { font-size: 11.5px; color: var(--text-3); }
+.call-row .btn { margin-left: 4px; }
+.call-row .btn.good { background: var(--ok); color: #fff; border-color: transparent; }
+
+/* ---------------------------------------------------------------- a screen share that stays black */
+.banner.share-black span { flex: 1; }
+.vp-note.warn { color: var(--warn); background: none; border: 0; padding: 0; font: inherit; font-size: 12px; cursor: pointer; text-align: left; }
+.vp-note.warn:hover { text-decoration: underline; }
+.tile-black-note { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); max-width: min(80%, 420px); display: flex; gap: 8px; align-items: flex-start; background: rgba(0, 0, 0, 0.72); color: #f4f5f7; padding: 10px 14px; border-radius: 10px; font-size: 13px; line-height: 1.4; pointer-events: none; }
+.share-black-help ol { margin: 8px 0 12px; padding-left: 22px; display: grid; gap: 8px; }
+.share-black-help li code { font-family: var(--mono); background: var(--bg-3); padding: 2px 6px; border-radius: 5px; user-select: all; }
+.share-black-help li .btn { margin-left: 6px; vertical-align: middle; }
+
+/* the formatting buttons scroll when the window is short */
+.focus-tools { overflow-y: auto; scrollbar-width: none; }
+.focus-tools .ft-btn { flex: none; }

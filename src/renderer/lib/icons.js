@@ -40,6 +40,8 @@ const ICONS = {
   crown: ['M2 18h20', 'M3 15 2 6l5.5 4L12 4l4.5 6L22 6l-1 9z'],
   pin: ['M12 17v5', 'M9 10.8V4h6v6.8l3 3.2v2H6v-2z', 'M8 4h8'],
   phone: ['M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1.9.4 1.8.7 2.7a2 2 0 0 1-.5 2.1L8 9.8a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.4c.9.3 1.8.6 2.7.7a2 2 0 0 1 1.7 2z'],
+  phoneIn: ['M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1.9.4 1.8.7 2.7a2 2 0 0 1-.5 2.1L8 9.8a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.4c.9.3 1.8.6 2.7.7a2 2 0 0 1 1.7 2z', 'M16 2v6h6', 'M22 2l-6 6'],
+  phoneMissed: ['M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1.9.4 1.8.7 2.7a2 2 0 0 1-.5 2.1L8 9.8a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.4c.9.3 1.8.6 2.7.7a2 2 0 0 1 1.7 2z', 'M16 2l6 6', 'M22 2l-6 6'],
   zoomIn: [[11, 11, 7], 'M21 21l-4.3-4.3', 'M11 8v6', 'M8 11h6'],
   zoomOut: [[11, 11, 7], 'M21 21l-4.3-4.3', 'M8 11h6'],
   search: [[11, 11, 7], 'M21 21l-4.3-4.3'],
@@ -91,6 +93,9 @@ const ICONS = {
   bold: ['M7 4h6a4 4 0 0 1 0 8H7z', 'M7 12h7a4 4 0 0 1 0 8H7z'],
   italic: ['M19 4h-9', 'M14 20H5', 'M15 4 9 20'],
   strike: ['M16 5.5A4 4 0 0 0 12 4h-1a3.5 3.5 0 0 0-1 6.9', 'M8 18.5a4 4 0 0 0 4 1.5h1a3.5 3.5 0 0 0 2.5-6', 'M4 12h16'],
+  underline: ['M6 4v6a6 6 0 0 0 12 0V4', 'M4 20h16'],
+  indent: ['M3 8l4 4-4 4', 'M11 6h10', 'M11 12h10', 'M11 18h10'],
+  outdent: ['M7 8l-4 4 4 4', 'M11 6h10', 'M11 12h10', 'M11 18h10'],
   list: ['M9 6h11', 'M9 12h11', 'M9 18h11', [4.5, 6, 1], [4.5, 12, 1], [4.5, 18, 1]],
   listOrdered: ['M10 6h11', 'M10 12h11', 'M10 18h11', 'M4 4h1v5', 'M4 9h2', 'M6 20H3.5c0-1.5 2.5-2 2.5-3.5a1.25 1.25 0 0 0-2.4-.5'],
   quote: ['M5 7h5v5c0 3-2 5-4.5 5.5', 'M14 7h5v5c0 3-2 5-4.5 5.5'],
@@ -114,10 +119,10 @@ const STROKE = { line: 2, thin: 1.6, neon: 2.3, quiet: 1.5 }
 
 // XP colours: what the icon is about decides its colour, like the old Windows icon sets did
 const XP_HUE = {
-  green: ['mic', 'phone', 'check', 'play', 'speaker', 'headphones', 'camera', 'music', 'shield', 'shieldPlain', 'plus', 'userPlus', 'signal', 'download', 'disc', 'skip', 'pause'],
+  green: ['mic', 'phone', 'check', 'play', 'speaker', 'headphones', 'camera', 'music', 'shield', 'shieldPlain', 'plus', 'userPlus', 'signal', 'download', 'disc', 'skip', 'pause', 'phoneIn'],
   yellow: ['folder', 'folderPlus', 'crown', 'zap', 'smile', 'lock', 'ticket', 'archive', 'clip', 'poll', 'cards', 'pin', 'inbox'],
-  red: ['micOff', 'headphonesOff', 'cameraOff', 'volumeX', 'x', 'trash', 'leave', 'userX', 'stop', 'alert', 'flag', 'calendar'],
-  gray: ['settings', 'edit', 'doc', 'focus', 'monitor', 'heading', 'bold', 'italic', 'strike', 'list', 'listOrdered', 'quote', 'table', 'minus', 'pencilLine', 'chess', 'clock', 'more', 'chevronDown', 'chevronRight', 'chevronLeft', 'flip', 'code'],
+  red: ['micOff', 'headphonesOff', 'cameraOff', 'volumeX', 'x', 'trash', 'leave', 'userX', 'stop', 'alert', 'flag', 'calendar', 'phoneMissed'],
+  gray: ['settings', 'edit', 'doc', 'focus', 'monitor', 'heading', 'bold', 'italic', 'underline', 'strike', 'indent', 'outdent', 'list', 'listOrdered', 'quote', 'table', 'minus', 'pencilLine', 'chess', 'clock', 'more', 'chevronDown', 'chevronRight', 'chevronLeft', 'flip', 'code'],
   purple: ['moon', 'sparkle', 'at'],
   sun: ['sun']
 }

@@ -541,7 +541,8 @@ function registerIpc () {
   handle('poker:open-mine', (id, h, j, locked, others) => poker.openMine(store.seed, tbl(id), hnum(h), j, String(locked), Array.isArray(others) ? others : []))
 
   // seconds since the last keyboard/mouse input anywhere (for "away")
-  handle('idle:get', () => powerMonitor.getSystemIdleTime())
+  // (in tests the PC's idle time is the tester's: the apps there count as busy)
+  handle('idle:get', () => TESTING ? 0 : powerMonitor.getSystemIdleTime())
 
   handle('friends:info', () => store.friendsInfo())
   handle('friend:add', (code, name) => {

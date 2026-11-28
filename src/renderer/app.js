@@ -1,6 +1,7 @@
 import { html, render, useEffect, useState, useRef } from './vendor/preact-htm.js'
 import { api, model, voice, music, useModel, initials, handleNewOps, onBlobProgress, retryMissingBlobs } from './lib/core.js'
 import { shortKey, HOME, DM_CALL } from './lib/model.js'
+import { CALL_ID } from './lib/calls.js'
 import { Icon } from './lib/icons.js'
 import { loadClaudeInfo } from './lib/claude.js'
 import { ChatView, Avatar, ThreadPanel } from './views/chat.js'
@@ -194,6 +195,7 @@ function VoicePanel () {
       </div>
       ${voice.serverMuted && html`<div class="vp-note"><${Icon} name="micOff" size=${13} /> A moderator muted you</div>`}
       ${voice.local.screen && g && html`<${StreamWatchers} g=${g} />`}
+      ${voice.local.screen && voice.screenBlack && html`<button class="vp-note warn" onClick=${() => model.openModal('screenBlack')}><${Icon} name="alert" size=${13} /> Your share looks black · what helps</button>`}
       <div class="vp-actions">
         <button class="btn ${voice.local.cam ? 'on' : ''}" onClick=${() => voice.toggleCamera()} title="Camera"><${Icon} name=${voice.local.cam ? 'camera' : 'cameraOff'} size=${18} /></button>
         <button class="btn ${voice.local.screen ? 'on' : ''}" onClick=${() => voice.local.screen ? voice.stopScreen() : model.openModal('screen')} title=${voice.local.screen ? 'Stop sharing' : 'Share screen'}><${Icon} name="screenUp" size=${18} /></button>
@@ -384,6 +386,8 @@ async function boot () {
         const g = model.groups.get(gid)
         const was = g?.voice.get(from)?.ch
         d.music = cleanMusic(d.music)
+        d.call = typeof d.call === 'string' && CALL_ID.test(d.call) ? d.call : null
+        d.black = d.black === true
         model.setVoiceState(gid, from, d)
         voice.onRemoteVoiceState(gid, from, d)
         if (g?.dm === from && d.ch === DM_CALL && was !== DM_CALL && !voice.inChannel(gid, DM_CALL)) notifyCall(g)

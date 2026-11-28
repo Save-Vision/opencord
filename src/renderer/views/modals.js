@@ -4,6 +4,7 @@ import { MAX_FOLDER_DEPTH } from '../lib/model.js'
 import { APPS } from '../lib/apps.js'
 import { loadClaudeInfo } from '../lib/claude.js'
 import { SCREEN_PRESETS, playTone } from '../lib/voice.js'
+import { browserOf } from '../lib/sharecheck.js'
 import { getMic, stopMic, noiseMode, isDenoised } from '../lib/denoise.js'
 import { extOf } from '../lib/highlight.js'
 import { Icon } from '../lib/icons.js'
@@ -49,6 +50,7 @@ export function Modals () {
     confirm: ConfirmModal,
     settings: SettingsModal,
     screen: ScreenPickerModal,
+    screenBlack: ScreenBlackModal,
     image: ImageModal,
     groupIcon: GroupIconModal,
     textFile: TextFileModal,
@@ -518,6 +520,30 @@ function ImageModal ({ a }) {
 
 // ---------------------------------------------------------------- screen share
 
+// What you share stays black: why (protected films), and what usually helps
+function ScreenBlackModal () {
+  const edge = browserOf(voice.screenOpts?.name) === 'edge'
+  const page = edge ? 'edge://settings/system' : 'chrome://settings/system'
+  const copy = () => { api.copy(page); model.toast('Copied: paste it into the address bar') }
+  return html`
+    <${Modal} title="Your screen share looks black">
+      <div class="modal-body share-black-help">
+        <p>Netflix, Disney+, Prime Video and most other streaming sites protect their films. Windows and the browser leave the picture out of every screen share (in Discord too), so your friends see black where the film plays. OpenDiscord can't get around that.</p>
+        <p><b>What usually helps</b>: let ${edge ? 'Edge' : 'Chrome'} play the film itself instead of through the graphics card's protected path.</p>
+        <ol>
+          <li>Open a new tab and go to <code>${page}</code> <button class="btn sm" onClick=${copy}><${Icon} name="copy" size=${14} /> Copy</button></li>
+          <li>Turn off <b>Use graphics acceleration when available</b>.</li>
+          <li>Click <b>Relaunch</b>, then start the film again.</li>
+        </ol>
+        <p class="hint">The film then shows up in your share; the site may send it in a lower quality. Turn the switch back on whenever you like. ${edge ? 'In Chrome the page is chrome://settings/system.' : 'In Edge the page is edge://settings/system.'} Firefox usually works as it is. The Netflix app for Windows can't be shared at all: use the browser.</p>
+      </div>
+      <footer>
+        <div class="spacer" />
+        <button class="btn primary" onClick=${() => model.closeModal()}>Got it</button>
+      </footer>
+    <//>`
+}
+
 function ScreenPickerModal () {
   const s = model.settings.screen
   const [sources, setSources] = useState(null)
@@ -549,7 +575,7 @@ function ScreenPickerModal () {
   const go = async () => {
     setBusy(true)
     try {
-      await voice.startScreen({ sourceId: sel, preset, audio, contentHint: hint })
+      await voice.startScreen({ sourceId: sel, sourceName: sources?.find(x => x.id === sel)?.name, preset, audio, contentHint: hint })
       saveSettings({ screen: { preset, contentHint: hint, audio } })
       model.closeModal()
     } catch (e) {

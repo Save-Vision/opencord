@@ -3,9 +3,9 @@
 // Chat messages (renderMarkdown): ```code blocks``` (highlighted), `inline code`, **bold**,
 // *italic*, __underline__, ~~strike~~, ||spoiler||, > quotes, links, [masked](links), @mentions.
 //
-// Markdown files (renderMarkdownDoc): the above plus headings, lists, task lists, tables,
-// horizontal rules and nested quotes. Remote images are shown as links rather than loaded,
-// because loading them would tell that server your IP address.
+// Markdown files (renderMarkdownDoc): the above plus headings, lists (sub-points at any depth),
+// task lists, tables, horizontal rules, nested quotes and indented paragraphs. Remote images are
+// shown as links rather than loaded, because loading them would tell that server your IP address.
 import { h } from '../vendor/preact-htm.js'
 import { highlight } from './highlight.js'
 
@@ -141,7 +141,10 @@ function cells (line) {
   return s.split(/(?<!\\)\|/).map(c => c.trim().replace(/\\\|/g, '|'))
 }
 
-function list (lines, start, ctx, key, depth) {
+// How far in an indented paragraph or list sits (a step is 4 spaces, or 2 for a start)
+const indentStyle = (spaces) => spaces >= 2 ? { marginLeft: Math.min(8, Math.max(1, Math.round(spaces / 4))) * 1.75 + 'em' } : undefined
+
+function list (lines, start, ctx, key, depth, style) {
   const first = LIST.exec(lines[start])
   const indent = first[1].length
   const ordered = /\d/.test(first[2])
@@ -151,13 +154,16 @@ function list (lines, start, ctx, key, depth) {
     const m = LIST.exec(lines[i])
     if (!m || m[1].length !== indent || /\d/.test(m[2]) !== ordered) break
     const body = [m[3]]
+    // where this item's text starts: its sub-points and continuation lines are measured from there
+    const col = indent + m[2].length + Math.min(4, /^\s*[-*+\d.)]+(\s+)/.exec(lines[i])[1].length)
+    const strip = new RegExp('^ {0,' + col + '}')
     i++
     // continuation lines and nested lists: anything indented deeper, or lazily continued text
     while (i < lines.length && !isBlank(lines[i])) {
       const n = LIST.exec(lines[i])
       if (n && n[1].length <= indent) break
       if (!n && /^\s*$/.test(lines[i].slice(0, indent + 1)) === false && startsBlock(lines[i])) break
-      body.push(lines[i].replace(new RegExp('^ {0,' + (indent + 4) + '}'), ''))
+      body.push(lines[i].replace(strip, ''))
       i++
     }
     if (i < lines.length && isBlank(lines[i]) && i + 1 < lines.length) {
@@ -174,7 +180,7 @@ function list (lines, start, ctx, key, depth) {
     ]))
   }
   const startNum = ordered ? parseInt(first[2], 10) : undefined
-  return { node: h(ordered ? 'ol' : 'ul', { key, start: startNum !== 1 ? startNum : undefined }, items), next: i }
+  return { node: h(ordered ? 'ol' : 'ul', { key, start: startNum !== 1 ? startNum : undefined, style }, items), next: i }
 }
 
 function docBlocks (text, ctx, depth = 0, tight = false) {
@@ -221,11 +227,13 @@ function docBlocks (text, ctx, depth = 0, tight = false) {
       continue
     }
     if (LIST.test(line)) {
-      const { node, next } = list(lines, i, ctx, out.length, depth)
+      // a list indented on its own (not under another item) is shown indented
+      const { node, next } = list(lines, i, ctx, out.length, depth, depth === 0 ? indentStyle(LIST.exec(line)[1].length) : undefined)
       out.push(node)
       i = next
       continue
     }
+    const paraIndent = /^ */.exec(line)[0].length
     const para = []
     while (i < lines.length && !isBlank(lines[i]) && !(para.length && startsBlock(lines[i])) &&
       !(lines[i].includes('|') && i + 1 < lines.length && TABLE_SEP.test(lines[i + 1]))) para.push(lines[i++].trim())
@@ -236,7 +244,7 @@ function docBlocks (text, ctx, depth = 0, tight = false) {
       if (j) parts.push(ctx.breaks || /\\$/.test(para[j - 1]) ? h('br', { key: 'br' + j }) : ' ')
       parts.push(...inline(l.replace(/\\$/, ''), ctx, j * 1000))
     })
-    out.push(tight && out.length === 0 ? h('span', { key: out.length }, parts) : h('p', { key: out.length }, parts))
+    out.push(tight && out.length === 0 ? h('span', { key: out.length }, parts) : h('p', { key: out.length, style: indentStyle(paraIndent) }, parts))
   }
   return out
 }
